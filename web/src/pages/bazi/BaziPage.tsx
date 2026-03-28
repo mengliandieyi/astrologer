@@ -84,6 +84,8 @@ type AiResp = {
   ai_text: string;
   provider: string;
   analyst_mode?: "full" | "career" | "wealth" | "love" | "children" | "kinship" | "health" | "study";
+  /** 服务端命中 SQLite/PG 缓存，未再调用大模型 */
+  from_cache?: boolean;
 };
 
 /** 左侧状态条：空闲 / 进行中 / 成功 / 失败 分色与动效 */
@@ -507,6 +509,8 @@ export function BaziPage() {
       genAiInFlightRef.current = false;
       return;
     }
+    /** 与按钮文案一致：同一维度再次点击 → refresh=1 强制重新生成 */
+    const sameModeAgain = aiAnalystMode === mode;
     setShowAiReading(true);
     const previousAi = aiText;
     setAiGenerating(true);
@@ -547,12 +551,18 @@ export function BaziPage() {
                     : mode === "study"
                       ? `chart_id=${id}&mode=study`
                       : `chart_id=${id}&mode=full`;
-      // 避免 GET 被缓存；全项常 60s+，客户端等足 5 分钟并超时给出明确提示
-      const out = await getJsonWithTimeout<AiResp>(`/api/reports/ai?${q}&_=${Date.now()}`, 300_000);
+      const refreshQ = sameModeAgain ? "&refresh=1" : "";
+      // 避免 GET 被浏览器缓存；命中服务端缓存时响应很快
+      const out = await getJsonWithTimeout<AiResp>(`/api/reports/ai?${q}${refreshQ}&_=${Date.now()}`, 300_000);
       setAiText(out.ai_text || "AI暂无返回");
       setAiAnalystMode(out.analyst_mode ?? mode);
       await track("ai_reading_view", { analyst_mode: out.analyst_mode ?? mode });
-      setStatus(`解读已完成（${modeLabel} · ${out.provider}）。`, "success");
+      setStatus(
+        out.from_cache
+          ? `解读已就绪（${modeLabel} · ${out.provider} · 已缓存，未再调用大模型）`
+          : `解读已完成（${modeLabel} · ${out.provider}）。`,
+        "success"
+      );
     } catch (e) {
       setAiText(previousAi);
       setStatus(`解读失败：${explainError((e as any)?.message || "")}`, "error");

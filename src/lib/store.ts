@@ -126,6 +126,12 @@ let pgReady = false;
 let sqliteDb: DatabaseSync | null = null;
 let sqliteReady = false;
 
+/** file 存储模式下的灵犀缓存（进程内，重启清空） */
+const fileModeAiCache = new Map<string, { ai_text: string; provider: string }>();
+function aiCacheKey(chartId: string, analystMode: string) {
+  return `${chartId}\0${analystMode}`;
+}
+
 function ensureDbFile() {
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   if (!fs.existsSync(dbFile)) {
@@ -166,6 +172,14 @@ function ensureSqlite(): DatabaseSync {
       );
       create index if not exists idx_events_created_at on events(created_at);
       create index if not exists idx_events_name on events(event_name);
+      create table if not exists ai_reading_cache (
+        chart_id text not null,
+        analyst_mode text not null,
+        ai_text text not null,
+        provider text not null,
+        updated_at text not null,
+        primary key (chart_id, analyst_mode)
+      );
     `);
     sqliteReady = true;
   }
@@ -201,6 +215,14 @@ async function ensurePg(): Promise<Pool> {
       );
       create index if not exists idx_events_created_at on events(created_at);
       create index if not exists idx_events_name on events(event_name);
+      create table if not exists ai_reading_cache (
+        chart_id text not null,
+        analyst_mode text not null,
+        ai_text text not null,
+        provider text not null,
+        updated_at timestamptz not null default now(),
+        primary key (chart_id, analyst_mode)
+      );
     `);
     pgReady = true;
   }
@@ -229,6 +251,60 @@ export async function saveChart(chart: StoredChart) {
   db.charts.unshift(chart);
   db.charts = db.charts.slice(0, 5000);
   writeDb(db);
+}
+
+export async function getAiReadingCache(
+  chartId: string,
+  analystMode: string
+): Promise<{ ai_text: string; provider: string } | undefined> {
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    const rs = await pool.query<{ ai_text: string; provider: string }>(
+      "select ai_text, provider from ai_reading_cache where chart_id = $1 and analyst_mode = $2 limit 1",
+      [chartId, analystMode]
+    );
+    const row = rs.rows[0];
+    return row ? { ai_text: row.ai_text, provider: row.provider } : undefined;
+  }
+  if (storageMode === "sqlite") {
+    const db = ensureSqlite();
+    const row = db
+      .prepare("select ai_text, provider from ai_reading_cache where chart_id = ? and analyst_mode = ? limit 1")
+      .get(chartId, analystMode) as { ai_text: string; provider: string } | undefined;
+    return row ? { ai_text: row.ai_text, provider: row.provider } : undefined;
+  }
+  return fileModeAiCache.get(aiCacheKey(chartId, analystMode));
+}
+
+export async function saveAiReadingCache(
+  chartId: string,
+  analystMode: string,
+  aiText: string,
+  provider: string
+): Promise<void> {
+  const now = new Date().toISOString();
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    await pool.query(
+      `insert into ai_reading_cache(chart_id, analyst_mode, ai_text, provider, updated_at)
+       values($1, $2, $3, $4, now())
+       on conflict (chart_id, analyst_mode) do update set
+         ai_text = excluded.ai_text, provider = excluded.provider, updated_at = now()`,
+      [chartId, analystMode, aiText, provider]
+    );
+    return;
+  }
+  if (storageMode === "sqlite") {
+    const db = ensureSqlite();
+    db.prepare(
+      `insert into ai_reading_cache(chart_id, analyst_mode, ai_text, provider, updated_at)
+       values(?, ?, ?, ?, ?)
+       on conflict(chart_id, analyst_mode) do update set
+         ai_text=excluded.ai_text, provider=excluded.provider, updated_at=excluded.updated_at`
+    ).run(chartId, analystMode, aiText, provider, now);
+    return;
+  }
+  fileModeAiCache.set(aiCacheKey(chartId, analystMode), { ai_text: aiText, provider });
 }
 
 export async function getChart(chartId: string): Promise<StoredChart | undefined> {

@@ -11,7 +11,14 @@ import type { BirthMeta } from "./lib/baziExtendedMeta.js";
 import { calculateBaziFromSolar } from "./lib/baziCalculator.js";
 import { generateAiReading } from "./lib/aiClient.js";
 import { enrichChartFortuneCycles } from "./lib/enrichChartFortunes.js";
-import { getChart, getMetrics, getStorageMode, saveChart } from "./lib/store.js";
+import {
+  getAiReadingCache,
+  getChart,
+  getMetrics,
+  getStorageMode,
+  saveAiReadingCache,
+  saveChart,
+} from "./lib/store.js";
 
 type ChartRecord = {
   chart_id: string;
@@ -319,6 +326,22 @@ app.get("/api/reports/ai", async (req, res) => {
                 : modeRaw === "study"
                   ? "study"
                   : "full";
+  const refresh =
+    String(req.query.refresh ?? "") === "1" || String(req.query.refresh ?? "").toLowerCase() === "true";
+
+  if (!refresh) {
+    const cached = await getAiReadingCache(chartId, analyst_mode);
+    if (cached) {
+      return res.json({
+        chart_id: chartId,
+        ai_text: cached.ai_text,
+        analyst_mode,
+        provider: cached.provider,
+        from_cache: true,
+      });
+    }
+  }
+
   const text = await generateAiReading({
     chart_id: chartId,
     one_line: chart.user_readable?.one_line || chart.basic_summary,
@@ -333,11 +356,14 @@ app.get("/api/reports/ai", async (req, res) => {
     age_shisui: Number.isFinite(ageQ) && ageQ > 0 && ageQ < 130 ? Math.floor(ageQ) : undefined,
     analyst_mode,
   });
+  const provider = process.env.ALI_API_KEY ? "qwen" : "fallback";
+  await saveAiReadingCache(chartId, analyst_mode, text, provider);
   return res.json({
     chart_id: chartId,
     ai_text: text,
     analyst_mode,
-    provider: process.env.ALI_API_KEY ? "qwen" : "fallback",
+    provider,
+    from_cache: false,
   });
 });
 
