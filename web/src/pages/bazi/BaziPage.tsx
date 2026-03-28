@@ -284,6 +284,8 @@ function explainError(message: string): string {
   if (message.includes("chart_id_and_anon_id_required")) return "缺少 anon_id";
   if (message.includes("chart_not_found")) return "排盘不存在或已过期";
   if (message.includes("request_timeout")) return "等待超时（全项常需 1–3 分钟）。请重试；若反复出现，请检查服务器 Caddy/Nginx 反代 read_timeout 是否 ≥300s。";
+  if (message.includes("network_or_gateway"))
+    return "连接被中断（常见于反代超时：全项常 >60s）。请在服务器 Caddy 的 reverse_proxy 内设置 transport http { read_timeout 300s; response_header_timeout 300s } 后 systemctl reload caddy，并执行 npm run build 后重启 PM2。";
   return message.slice(0, 160);
 }
 
@@ -309,7 +311,11 @@ async function getJsonWithTimeout<T>(url: string, timeoutMs: number): Promise<T>
     return (await res.json()) as T;
   } catch (e) {
     const name = e instanceof Error ? e.name : "";
+    const msg = e instanceof Error ? e.message : String(e);
     if (name === "AbortError") throw new Error("request_timeout");
+    if (/failed to fetch|load failed|networkerror|network request failed/i.test(msg)) {
+      throw new Error("network_or_gateway");
+    }
     throw e;
   } finally {
     clearTimeout(timer);

@@ -289,6 +289,8 @@ app.get("/api/reports/ai", async (req, res) => {
   if (!chartId) return res.status(400).json({ error: "chart_id_required" });
   const chart = await getChart(chartId);
   if (!chart) return res.status(404).json({ error: "chart_not_found" });
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("X-Accel-Buffering", "no");
   const strongest = maxElement(chart.five_elements);
   const weakest = minElement(chart.five_elements);
   const ageQ = Number(req.query.age_shisui ?? "");
