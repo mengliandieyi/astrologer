@@ -123,3 +123,39 @@ export function isValidTriple(province: string, city: string, district: string):
   if (!cities.includes(city)) return false;
   return getDistricts(province, city).includes(district);
 }
+
+/**
+ * 从排盘时拼接的 birth_location（省+市+区）反推省市区，供分享链接回填表单。
+ * 按名称最长优先匹配，减少「内蒙古」等歧义。
+ */
+export function deriveRegionTripleFromLocation(full: string): { province: string; city: string; district: string } {
+  const s = full.trim();
+  if (!s) return { province: "", city: "", district: "" };
+  const provinces = [...PROVINCES].sort((a, b) => b.length - a.length);
+  let province = "";
+  for (const p of provinces) {
+    if (s.startsWith(p)) {
+      province = p;
+      break;
+    }
+  }
+  if (!province) return { province: "", city: "", district: "" };
+  let rest = s.slice(province.length);
+  const cities = [...getCities(province)].sort((a, b) => b.length - a.length);
+  let city = "";
+  for (const c of cities) {
+    if (rest.startsWith(c)) {
+      city = c;
+      break;
+    }
+  }
+  if (!city) return { province, city: "", district: "" };
+  rest = rest.slice(city.length);
+  const districts = [...getDistricts(province, city)].sort((a, b) => b.length - a.length);
+  for (const d of districts) {
+    if (rest.startsWith(d)) {
+      return { province, city, district: d };
+    }
+  }
+  return { province, city, district: rest };
+}

@@ -26,6 +26,9 @@ type ChartRecord = {
   gender?: 0 | 1;
   /** 排盘请求中的出生地（与真太阳时校正用 location 一致） */
   birth_location?: string;
+  birth_date?: string;
+  birth_time?: string;
+  birth_timezone?: string;
   basic_summary: string;
   pillars: Record<string, string>;
   five_elements: Record<string, number>;
@@ -240,6 +243,9 @@ app.post("/api/bazi/calculate", async (req, res) => {
       chart_id: chartId,
       gender: g,
       birth_location: String(location).trim(),
+      birth_date: String(birth_date),
+      birth_time: String(birth_time),
+      birth_timezone: String(timezone),
       basic_summary: calc.basic_summary,
       pillars: calc.pillars,
       five_elements: calc.five_elements,

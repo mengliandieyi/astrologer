@@ -15,6 +15,16 @@ type ChartRecord = {
   chart_id: string;
   /** 出生地（与排盘时省市区一致）；旧盘可能无此字段 */
   birth_location?: string;
+  /** 分享回填：排盘提交的日期/时间/时区（新存盘才有） */
+  birth_date?: string;
+  birth_time?: string;
+  birth_timezone?: string;
+  gender?: 0 | 1;
+  calendar_meta?: {
+    input_calendar: "solar" | "lunar";
+    solar_datetime: string;
+    lunar_datetime: string;
+  };
   basic_summary: string;
   pillars: { year: string; month: string; day: string; hour: string };
   five_elements: Record<string, number>;
@@ -87,6 +97,23 @@ type AiResp = {
   /** 服务端命中 SQLite/PG 缓存，未再调用大模型 */
   from_cache?: boolean;
 };
+
+function normalizeBirthTimeForForm(t: string): string {
+  const m = t.trim().match(/^(\d{1,2}):(\d{1,2})/);
+  if (!m) return t.trim();
+  return `${m[1].padStart(2, "0")}:${m[2].padStart(2, "0")}`;
+}
+
+/** 与后端 calendar_meta.solar_datetime（toYmdHms）对齐 */
+function deriveBirthFromSolarDatetime(s: string): { date: string; time: string } | null {
+  const m = s.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2})/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m;
+  return {
+    date: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+    time: `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`,
+  };
+}
 
 /** 左侧状态条：空闲 / 进行中 / 成功 / 失败 分色与动效 */
 type BaziStatusTone = "idle" | "pending" | "success" | "error";
@@ -450,6 +477,34 @@ export function BaziPage() {
       }
       if (fullChart) {
         setChart(fullChart);
+        if (fullChart.calendar_meta?.input_calendar)
+          setCalendarType(fullChart.calendar_meta.input_calendar);
+        if (fullChart.gender === 0 || fullChart.gender === 1) setGender(fullChart.gender);
+        setTimezone(fullChart.birth_timezone?.trim() || "Asia/Shanghai");
+        let hasDate = false;
+        let hasTime = false;
+        if (fullChart.birth_date && /^\d{4}-\d{2}-\d{2}$/.test(fullChart.birth_date)) {
+          setBirthDate(fullChart.birth_date);
+          hasDate = true;
+        }
+        if (fullChart.birth_time && /\d{1,2}:\d{2}/.test(fullChart.birth_time)) {
+          setBirthTime(normalizeBirthTimeForForm(fullChart.birth_time));
+          hasTime = true;
+        }
+        if ((!hasDate || !hasTime) && fullChart.calendar_meta?.solar_datetime) {
+          const dt = deriveBirthFromSolarDatetime(fullChart.calendar_meta.solar_datetime);
+          if (dt) {
+            if (!hasDate) setBirthDate(dt.date);
+            if (!hasTime) setBirthTime(dt.time);
+          }
+        }
+        if (fullChart.birth_location) {
+          const { deriveRegionTripleFromLocation } = await import("../../lib/chinaRegion");
+          const r = deriveRegionTripleFromLocation(fullChart.birth_location);
+          if (r.province) setProvince(r.province);
+          if (r.city) setCity(r.city);
+          if (r.district) setCounty(r.district);
+        }
       } else {
         setChart({
           chart_id: chartId,

@@ -11,6 +11,10 @@ export type StoredChart = {
   gender?: 0 | 1;
   /** 用户填写的出生地文案（省市区拼接等），用于分享卡与展示 */
   birth_location?: string;
+  /** 排盘请求中的日期/时间/时区，分享链接回填左侧表单 */
+  birth_date?: string;
+  birth_time?: string;
+  birth_timezone?: string;
   birth_meta?: BirthMeta;
   basic_summary: string;
   pillars: Record<string, string>;
