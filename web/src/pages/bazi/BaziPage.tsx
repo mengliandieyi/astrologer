@@ -283,6 +283,7 @@ function explainError(message: string): string {
   if (message.includes("too_many_requests")) return "请求过于频繁，请稍后再试";
   if (message.includes("chart_id_and_anon_id_required")) return "缺少 anon_id";
   if (message.includes("chart_not_found")) return "排盘不存在或已过期";
+  if (message.includes("request_timeout")) return "等待超时（全项常需 1–3 分钟）。请重试；若反复出现，请检查服务器 Caddy/Nginx 反代 read_timeout 是否 ≥300s。";
   return message.slice(0, 160);
 }
 
@@ -296,6 +297,23 @@ async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(await res.text());
   return (await res.json()) as T;
+}
+
+/** 灵犀等长耗时 GET；带超时避免网关断连后界面一直转圈 */
+async function getJsonWithTimeout<T>(url: string, timeoutMs: number): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { cache: "no-store", signal: ctrl.signal });
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as T;
+  } catch (e) {
+    const name = e instanceof Error ? e.name : "";
+    if (name === "AbortError") throw new Error("request_timeout");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function FormField(props: { label: string; children: React.ReactNode; full?: boolean }) {
@@ -523,8 +541,8 @@ export function BaziPage() {
                     : mode === "study"
                       ? `chart_id=${id}&mode=study`
                       : `chart_id=${id}&mode=full`;
-      // 避免 GET 被缓存：同一点击多次需拿到新一篇解读
-      const out = await getJson<AiResp>(`/api/reports/ai?${q}&_=${Date.now()}`);
+      // 避免 GET 被缓存；全项常 60s+，客户端等足 5 分钟并超时给出明确提示
+      const out = await getJsonWithTimeout<AiResp>(`/api/reports/ai?${q}&_=${Date.now()}`, 300_000);
       setAiText(out.ai_text || "AI暂无返回");
       setAiAnalystMode(out.analyst_mode ?? mode);
       await track("ai_reading_view", { analyst_mode: out.analyst_mode ?? mode });
@@ -1014,9 +1032,9 @@ export function BaziPage() {
                     aria-live="polite"
                   >
                     <p className="text-base font-semibold text-[var(--text-strong)]">正在生成…</p>
-                    <p className="max-w-[18rem] text-sm text-[var(--text-muted)]">
-                      预计约 <span className="font-semibold text-[var(--text-main)]">30–90 秒</span>
-                      （视网络与大模型负载而定，若超时请稍后重试）
+                    <p className="max-w-[20rem] text-sm text-[var(--text-muted)]">
+                      预计约 <span className="font-semibold text-[var(--text-main)]">1–3 分钟</span>
+                      （「全项」更长；若超过 5 分钟会提示超时，多为网关反代超时，需把 Caddy/Nginx read_timeout 调到 ≥300s）
                     </p>
                   </div>
                 ) : (
