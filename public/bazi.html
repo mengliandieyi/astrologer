@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知行馆 · 八字排盘</title>
+    <link rel="stylesheet" href="/_ui.css" />
+  </head>
+  <body>
+    <div class="app-shell motion-in">
+      <div id="topbar"></div>
+
+      <section class="hero">
+        <div class="hero-kicker">Bazi</div>
+        <h1>八字排盘 · 灵犀解读</h1>
+        <p>先呈结论，再列依据；可读、可验、可用。</p>
+      </section>
+
+      <section class="layout-2col">
+        <div class="card panel">
+          <div class="grid">
+            <div><label>出生日期</label><input id="birthDate" type="date" value="1998-10-21" /></div>
+            <div><label>出生时间</label><input id="birthTime" type="time" value="09:20" /></div>
+            <div><label>历法</label><select id="calendarType"><option value="solar">阳历（公历）</option><option value="lunar">阴历（农历）</option></select></div>
+            <div><label>性别</label><select id="gender"><option value="1">男</option><option value="0">女</option></select></div>
+            <div><label>时区</label><select id="timezone"><option value="Asia/Shanghai">Asia/Shanghai</option></select></div>
+            <div><label>出生地</label><input id="location" value="shanghai" /></div>
+            <div class="full"><label>匿名标识</label><input id="anonId" value="user_demo_001" /></div>
+          </div>
+          <div class="row">
+            <button id="runBtn" class="btn-primary">开始排盘</button>
+            <button id="aiBtn" class="btn-dark" disabled>生成灵犀解读</button>
+            <button id="shareBtn" class="btn-light" disabled>生成分享卡</button>
+          </div>
+          <div class="row">
+            <button class="btn-light" data-preset="demo">示例</button>
+            <button class="btn-light" data-preset="male90">90后男</button>
+            <button class="btn-light" data-preset="female00">00后女</button>
+            <button class="btn-light" data-preset="clear">清空</button>
+          </div>
+          <div id="status" class="status"></div>
+          <details>
+            <summary>术语说明（流年/大运/十神/神煞）</summary>
+            <div>
+              <ul>
+                <li><b>流年</b>：每一年的运势环境变化，可看年度节奏。</li>
+                <li><b>大运</b>：十年一个阶段，决定长期主旋律。</li>
+                <li><b>十神</b>：日主与其他干支关系，反映行为模式。</li>
+                <li><b>神煞</b>：辅助标签，提示机会和风险，不单点决定。</li>
+              </ul>
+            </div>
+          </details>
+        </div>
+        <div id="result" class="card panel" style="display:none;"></div>
+      </section>
+
+      <p class="legal"><a href="/terms" target="_blank">服务条款</a> · <a href="/privacy" target="_blank">隐私政策</a> · 本服务仅供文化娱乐参考</p>
+    </div>
+
+    <script src="/_nav.js"></script>
+    <script>
+      const runBtn = document.getElementById("runBtn");
+      const aiBtn = document.getElementById("aiBtn");
+      const shareBtn = document.getElementById("shareBtn");
+      const resultEl = document.getElementById("result");
+      const statusEl = document.getElementById("status");
+      let currentChart = null;
+      let currentShareUrl = "";
+
+      function setStatus(text, ok = false) {
+        statusEl.textContent = text;
+        statusEl.className = ok ? "status ok" : "status";
+      }
+
+      function explainError(message) {
+        if (!message) return "请求失败，请稍后重试";
+        if (message.includes("missing_required_fields")) return "必填项未填写完整";
+        if (message.includes("invalid_birth_datetime_format")) return "出生日期或时间格式不正确";
+        if (message.includes("invalid_location")) return "出生地格式不正确，请用中文/英文城市名";
+        if (message.includes("too_many_requests")) return "请求过于频繁，请稍后再试";
+        return message.slice(0, 120);
+      }
+
+      async function postJson(url, payload) {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        return res.status === 204 ? null : res.json();
+      }
+
+      async function track(event_name, extra = {}) {
+        const anon_id = document.getElementById("anonId").value.trim() || "guest";
+        await postJson("/api/events/track", {
+          event_name,
+          anon_id,
+          session_id: "web_" + Date.now(),
+          chart_id: currentChart?.chart_id,
+          ...extra,
+        });
+      }
+
+      function render(chart, report) {
+        const sec = report.sections.map((x) => `<li><b>${x.title}</b>：${x.content}</li>`).join("");
+        const evd = (report.evidence || []).map((e) => {
+          const facts = e.factors.map((f) => `<li>${f.factor_name}（权重${f.weight}）:${f.reason}</li>`).join("");
+          return `<details><summary>${e.claim}</summary><div><p class="hint">${e.plain_explanation}</p><ul>${facts}</ul><p class="hint">置信度${e.confidence} · ${e.risk_note}</p></div></details>`;
+        }).join("");
+        const liu = (chart.fortune_cycles?.liu_nian_preview || []).map((x) => `<li>${x.year}（${x.gan_zhi}）：${(chart.user_readable?.liu_nian_tips || []).find((t) => t.year === x.year)?.tip || "建议稳中求进，阶段复盘。"}</li>`).join("");
+
+        resultEl.innerHTML = `
+          <h3>解读结果</h3>
+          <p class="hint">先看新手版，再看证据与专业版。</p>
+          <div class="kpi">
+            <div class="item"><div class="k">排盘ID</div><div class="v mono">${chart.chart_id}</div></div>
+            <div class="item"><div class="k">A/B分组</div><div class="v">${report.ab_group}</div></div>
+            <div class="item"><div class="k">置信度</div><div class="v">${report.confidence_score}</div></div>
+          </div>
+          <div class="chips">
+            <span class="chip">年柱 ${chart.pillars.year}</span>
+            <span class="chip">月柱 ${chart.pillars.month}</span>
+            <span class="chip">日柱 ${chart.pillars.day}</span>
+            <span class="chip">时柱 ${chart.pillars.hour}</span>
+          </div>
+          <div class="block">
+            <h3 style="font-size:16px; margin:0;">新手版结论</h3>
+            <div class="box"><h4>一句话</h4><div>${chart.user_readable?.one_line || chart.basic_summary}</div></div>
+            <div class="box"><h4>怎么做（3条）</h4><ul>${(chart.user_readable?.actions || []).map((x) => `<li>${x}</li>`).join("")}</ul></div>
+            <div class="box"><h4>要注意（3条）</h4><ul>${(chart.user_readable?.cautions || []).map((x) => `<li>${x}</li>`).join("")}</ul></div>
+            <div class="box"><h4>近5年（按当前年份）</h4><ul>${liu}</ul></div>
+          </div>
+          <div class="block">
+            <h3 style="font-size:16px; margin:0;">深度解读</h3>
+            <div class="box"><ul>${sec}</ul></div>
+          </div>
+          <div class="block">
+            <h3 style="font-size:16px; margin:0;">证据链</h3>
+            ${evd || "<p class='hint'>当前分组未展示证据链。</p>"}
+          </div>
+          <div class="block">
+            <h3 style="font-size:16px; margin:0;">AI深度解读</h3>
+            <textarea id="aiText" class="ai" placeholder="点击左侧“生成AI解读”按钮后显示内容..." readonly></textarea>
+          </div>
+          <div class="block">
+            <h3 style="font-size:16px; margin:0;">专业版信息</h3>
+            <div class="box">
+              <ul>
+                <li>真太阳时：${chart.true_solar_time || "-"}</li>
+                <li>节气：${chart.jie_qi_window?.current || chart.jie_qi || "-"}</li>
+                <li>格局：${chart.ge_ju || "-"}</li>
+                <li>日主强弱：${chart.day_master?.strength_level || "-"}（${chart.day_master?.strength_score ?? "-"}）</li>
+                <li>喜用：${(chart.day_master?.useful_elements || []).join("、") || "-"}</li>
+                <li>忌神：${(chart.day_master?.avoid_elements || []).join("、") || "无明显"}</li>
+              </ul>
+            </div>
+          </div>
+        `;
+        resultEl.style.display = "block";
+      }
+
+      function getPayload() {
+        return {
+          birth_date: document.getElementById("birthDate").value,
+          birth_time: document.getElementById("birthTime").value,
+          timezone: document.getElementById("timezone").value,
+          location: document.getElementById("location").value.trim(),
+          calendar_type: document.getElementById("calendarType").value,
+          gender: Number(document.getElementById("gender").value),
+        };
+      }
+
+      runBtn.addEventListener("click", async () => {
+        runBtn.disabled = true;
+        shareBtn.disabled = true;
+        aiBtn.disabled = true;
+        setStatus("正在排盘并生成报告...", false);
+        try {
+          const payload = getPayload();
+          if (!payload.birth_date || !payload.birth_time || !payload.location) throw new Error("请先填写出生信息");
+          const anonId = document.getElementById("anonId").value.trim() || "guest";
+          const chart = await postJson("/api/bazi/calculate", payload);
+          const reportRes = await fetch(`/api/reports/pro?chart_id=${encodeURIComponent(chart.chart_id)}&anon_id=${encodeURIComponent(anonId)}`);
+          if (!reportRes.ok) throw new Error(await reportRes.text());
+          const report = await reportRes.json();
+          currentChart = chart;
+          currentShareUrl = "";
+          render(chart, report);
+          await track("report_view");
+          shareBtn.disabled = false;
+          aiBtn.disabled = false;
+          setStatus("完成：你可以继续点“生成AI解读”。", true);
+        } catch (e) {
+          setStatus("失败：" + explainError(e?.message || ""), false);
+        } finally {
+          runBtn.disabled = false;
+        }
+      });
+
+      aiBtn.addEventListener("click", async () => {
+        if (!currentChart) return;
+        aiBtn.disabled = true;
+        setStatus("正在生成灵犀解读（通义）...", false);
+        try {
+          const res = await fetch(`/api/reports/ai?chart_id=${encodeURIComponent(currentChart.chart_id)}`);
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          const target = document.getElementById("aiText");
+          if (target) target.value = data.ai_text || "AI暂无返回";
+          await track("ai_reading_view");
+          setStatus(`灵犀解读已成（来源：${data.provider}）。`, true);
+        } catch (e) {
+          setStatus("灵犀解读失败：" + explainError(e?.message || ""), false);
+        } finally {
+          aiBtn.disabled = false;
+        }
+      });
+
+      shareBtn.addEventListener("click", async () => {
+        if (!currentChart) return;
+        shareBtn.disabled = true;
+        try {
+          const out = await postJson("/api/share-cards/render", {
+            chart_id: currentChart.chart_id,
+            template_id: "default_v2",
+            anon_id: document.getElementById("anonId").value.trim() || "guest",
+          });
+          currentShareUrl = out.share_url;
+          await track("share_success");
+          window.open(out.share_url, "_blank");
+          setStatus("分享链接已打开。", true);
+        } catch (e) {
+          setStatus("分享失败：" + explainError(e?.message || ""), false);
+        } finally {
+          shareBtn.disabled = false;
+        }
+      });
+
+      document.querySelectorAll("[data-preset]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.getAttribute("data-preset");
+          if (key === "clear") {
+            document.getElementById("birthDate").value = "";
+            document.getElementById("birthTime").value = "";
+            document.getElementById("location").value = "";
+            setStatus("已清空输入。", true);
+            return;
+          }
+          if (key === "male90") {
+            document.getElementById("birthDate").value = "1993-07-12";
+            document.getElementById("birthTime").value = "14:30";
+            document.getElementById("gender").value = "1";
+            document.getElementById("location").value = "beijing";
+            document.getElementById("calendarType").value = "solar";
+            setStatus("已填入 90 后男示例。", true);
+            return;
+          }
+          if (key === "female00") {
+            document.getElementById("birthDate").value = "2002-11-06";
+            document.getElementById("birthTime").value = "06:45";
+            document.getElementById("gender").value = "0";
+            document.getElementById("location").value = "shenzhen";
+            document.getElementById("calendarType").value = "solar";
+            setStatus("已填入 00 后女示例。", true);
+            return;
+          }
+          document.getElementById("birthDate").value = "1998-10-21";
+          document.getElementById("birthTime").value = "09:20";
+          document.getElementById("gender").value = "1";
+          document.getElementById("location").value = "shanghai";
+          document.getElementById("calendarType").value = "solar";
+          document.getElementById("anonId").value = "user_demo_001";
+          setStatus("已填入默认示例。", true);
+        });
+      });
+
+      (async function autoLoadFromQuery() {
+        const params = new URLSearchParams(window.location.search);
+        const chartId = params.get("chart_id");
+        if (!chartId) return;
+        try {
+          setStatus("正在从分享链接加载...", false);
+          const anonId = document.getElementById("anonId").value.trim() || "guest";
+          const reportRes = await fetch(`/api/reports/pro?chart_id=${encodeURIComponent(chartId)}&anon_id=${encodeURIComponent(anonId)}`);
+          if (!reportRes.ok) throw new Error(await reportRes.text());
+          const report = await reportRes.json();
+          // 兼容：没有 chart 数据时也能展示 report
+          currentChart = { chart_id: chartId, basic_summary: "来自分享链接", pillars: { year: "-", month: "-", day: "-", hour: "-" } };
+          render(currentChart, report);
+          setStatus("已从分享链接加载。", true);
+        } catch (e) {
+          setStatus("分享链接加载失败：" + explainError(e?.message || ""), false);
+        }
+      })();
+    </script>
+  </body>
+</html>

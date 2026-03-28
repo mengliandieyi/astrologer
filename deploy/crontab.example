@@ -1,0 +1,2 @@
+# backup sqlite every day at 03:10
+10 3 * * * /Users/admin/Desktop/astrologer/scripts/backup-sqlite.sh >> /Users/admin/Desktop/astrologer/logs/backup.log 2>&1

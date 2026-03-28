@@ -1,0 +1,137 @@
+openapi: 3.0.3
+info:
+  title: Astrologer MVP API
+  version: 0.1.0
+servers:
+  - url: https://api.yourdomain.com
+paths:
+  /api/bazi/calculate:
+    post:
+      summary: Calculate Bazi chart
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [birth_date, birth_time, timezone, location]
+              properties:
+                birth_date: { type: string, format: date }
+                birth_time: { type: string, example: "08:30:00" }
+                timezone: { type: string, example: "Asia/Shanghai" }
+                location: { type: string, example: "Shanghai" }
+                gender: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chart_id: { type: string, format: uuid }
+                  basic_summary: { type: string }
+                  pillars: { type: object }
+                  five_elements: { type: object }
+  /api/reports/pro:
+    get:
+      summary: Get pro report with evidence chain
+      parameters:
+        - in: query
+          name: chart_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report_id: { type: string, format: uuid }
+                  ab_group: { type: string, enum: [A, B] }
+                  confidence_score: { type: integer, minimum: 0, maximum: 100 }
+                  sections:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title: { type: string }
+                        content: { type: string }
+                  evidence:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EvidenceItem"
+  /api/share-cards/render:
+    post:
+      summary: Render share card
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chart_id, template_id]
+              properties:
+                chart_id: { type: string, format: uuid }
+                template_id: { type: string }
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  image_url: { type: string }
+                  share_url: { type: string }
+  /api/events/track:
+    post:
+      summary: Track analytics event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_name, anon_id, session_id]
+              properties:
+                event_name:
+                  type: string
+                  enum: [report_view, pro_click, evidence_expand, share_click, share_success, return_visit_d1, return_visit_d7]
+                anon_id: { type: string }
+                session_id: { type: string }
+                report_id: { type: string, format: uuid, nullable: true }
+                chart_id: { type: string, format: uuid, nullable: true }
+                ab_group: { type: string, enum: [A, B] }
+                props: { type: object, additionalProperties: true }
+      responses:
+        "204":
+          description: Stored
+components:
+  schemas:
+    EvidenceFactor:
+      type: object
+      required: [factor_code, factor_name, weight, direction, reason]
+      properties:
+        factor_code: { type: string }
+        factor_name: { type: string }
+        weight: { type: number, format: float }
+        direction: { type: string, enum: [support, neutral, conflict] }
+        reason: { type: string }
+    EvidenceItem:
+      type: object
+      required: [insight_id, claim, plain_explanation, factors, confidence]
+      properties:
+        insight_id: { type: string }
+        claim: { type: string }
+        plain_explanation: { type: string }
+        factors:
+          type: array
+          minItems: 2
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/EvidenceFactor"
+        risk_note: { type: string }
+        confidence: { type: integer, minimum: 0, maximum: 100 }

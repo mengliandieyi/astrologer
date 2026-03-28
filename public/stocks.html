@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知行馆 · 资研参详</title>
+    <link rel="stylesheet" href="/_ui.css" />
+  </head>
+  <body>
+    <div class="app-shell motion-in">
+      <div id="topbar"></div>
+
+      <section class="hero">
+        <div class="hero-kicker">Asset</div>
+        <h1>资研参详 · 灵犀研判</h1>
+        <p>先辨其要，再列其险；最后给出可执行的核验与复盘。</p>
+        <div class="badges">
+          <span class="badge">自选资产卡片</span>
+          <span class="badge">材料摘要</span>
+          <span class="badge">风险提示</span>
+          <span class="badge">研究复盘（规划中）</span>
+        </div>
+      </section>
+
+      <section class="layout-2col">
+        <div class="card">
+          <h3>输入</h3>
+          <p class="hint">粘贴公告/研报/新闻要点，AI 生成结构化摘要与风险清单。</p>
+          <div class="grid">
+            <div class="full">
+              <label>资产（可多个，用逗号分隔）</label>
+              <input id="symbols" placeholder="例如：贵州茅台, 宁德时代, 00700.HK" />
+            </div>
+            <div class="full">
+              <label>你的目标</label>
+              <input id="goal" placeholder="例如：中长期持有，偏稳健；看重现金流和行业壁垒" />
+            </div>
+            <div class="full">
+              <label>材料（粘贴公告/研报/新闻片段）</label>
+              <textarea id="material" rows="8" placeholder="粘贴材料片段，AI 会结构化总结与提炼风险。"></textarea>
+            </div>
+          </div>
+          <div class="row">
+            <button id="genBtn" class="btn-primary">生成灵犀研判</button>
+            <button id="clearBtn" class="btn-light">清空</button>
+          </div>
+          <div id="status" class="status"></div>
+          <details>
+            <summary>合规提示</summary>
+            <div>
+              <div class="hint">本页输出为信息整理与教育用途，不构成投资建议。最终决策请自行评估与核验。</div>
+            </div>
+          </details>
+        </div>
+
+        <div class="card" id="result" style="display:none;"></div>
+      </section>
+
+      <p class="legal"><a href="/terms" target="_blank">服务条款</a> · <a href="/privacy" target="_blank">隐私政策</a></p>
+    </div>
+
+    <script src="/_nav.js"></script>
+    <script>
+      const statusEl = document.getElementById("status");
+      const resultEl = document.getElementById("result");
+      const genBtn = document.getElementById("genBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      function setStatus(text, ok=false){
+        statusEl.textContent = text;
+        statusEl.className = ok ? "status ok" : "status";
+      }
+
+      clearBtn.addEventListener("click", () => {
+        document.getElementById("symbols").value = "";
+        document.getElementById("goal").value = "";
+        document.getElementById("material").value = "";
+        resultEl.style.display = "none";
+        setStatus("已清空。", true);
+      });
+
+      genBtn.addEventListener("click", async () => {
+        genBtn.disabled = true;
+        setStatus("正在生成灵犀研判...", false);
+        try{
+          const symbols = document.getElementById("symbols").value.trim();
+          const goal = document.getElementById("goal").value.trim();
+          const material = document.getElementById("material").value.trim();
+          if (!symbols && !material) throw new Error("至少填一个资产或粘贴材料");
+
+          const res = await fetch("/api/ai/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              scene: "stocks",
+              user_goal: goal,
+              context: { symbols, material }
+            })
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          resultEl.innerHTML = `
+            <h3>研判</h3>
+            <p class="hint">来源：${data.provider}</p>
+            <div class="box"><h4>结构化输出</h4><div style="white-space:pre-wrap; line-height:1.75;">${escapeHtml(data.text || "")}</div></div>
+          `;
+          resultEl.style.display = "block";
+          setStatus("完成。", true);
+          resultEl.scrollIntoView({ behavior: "smooth", block: "start" });
+        }catch(e){
+          setStatus("失败：" + String(e?.message || e), false);
+        }finally{
+          genBtn.disabled = false;
+        }
+      });
+
+      function escapeHtml(s){
+        return String(s)
+          .replaceAll("&","&amp;")
+          .replaceAll("<","&lt;")
+          .replaceAll(">","&gt;")
+          .replaceAll('"',"&quot;")
+          .replaceAll("'","&#39;");
+      }
+    </script>
+  </body>
+</html>

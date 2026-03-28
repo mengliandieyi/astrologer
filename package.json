@@ -1,0 +1,36 @@
+{
+  "name": "astrologer-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:web": "npm --prefix web run dev",
+    "dev:all": "concurrently -n api,web -c cyan,magenta \"npm run dev\" \"npm run dev:web\"",
+    "start": "node --enable-source-maps dist/server.js",
+    "build": "npm run build:web && tsc -p tsconfig.json",
+    "build:web": "npm --prefix web run build",
+    "prod:start": "./scripts/start-prod.sh",
+    "prod:stop": "./scripts/stop-prod.sh",
+    "prod:health": "./scripts/healthcheck.sh",
+    "backup": "./scripts/backup-sqlite.sh"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "express": "^4.21.2",
+    "lunar-javascript": "^1.7.7",
+    "luxon": "^3.7.2",
+    "pg": "^8.20.0",
+    "solarlunar": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^22.13.10",
+    "@types/pg": "^8.20.0",
+    "concurrently": "^9.2.1",
+    "playwright": "^1.58.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

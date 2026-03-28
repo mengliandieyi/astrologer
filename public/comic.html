@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知行馆 · 漫剧工坊</title>
+    <link rel="stylesheet" href="/_ui.css" />
+  </head>
+  <body>
+    <div class="app-shell motion-in">
+      <div id="topbar"></div>
+
+      <section class="hero">
+        <div class="hero-kicker">Comic</div>
+        <h1>漫剧工坊 · 灵犀分镜</h1>
+        <p>给我题材、角色与风格，我给你分镜脚本与对白节奏。</p>
+        <div class="badges">
+          <span class="badge">分镜脚本</span>
+          <span class="badge">对白与节奏</span>
+          <span class="badge">留钩与反转</span>
+          <span class="badge">二创建议</span>
+        </div>
+      </section>
+
+      <section class="layout-2col">
+        <div class="card">
+          <h3>输入</h3>
+          <p class="hint">建议先用 8 镜小短篇验证风格，再扩展成连续剧情。</p>
+          <div class="grid">
+            <div class="full">
+              <label>题材/主题</label>
+              <input id="theme" placeholder="例如：国风都市 · 轻喜 · 小悬疑" />
+            </div>
+            <div class="full">
+              <label>风格</label>
+              <input id="style" placeholder="例如：国风轻喜、克制高级、少中二" />
+            </div>
+            <div class="full">
+              <label>角色设定</label>
+              <textarea id="roles" rows="5" placeholder="例如：女主（理性冷幽默）、男主（温润腹黑）、师父（嘴硬心软）..."></textarea>
+            </div>
+            <div>
+              <label>镜头数量</label>
+              <input id="length" type="number" min="3" max="24" value="8" />
+            </div>
+            <div>
+              <label>额外约束</label>
+              <input id="constraints" placeholder="例如：不出现血腥；每镜对白<=2句" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="genBtn" class="btn-primary">生成灵犀分镜</button>
+            <button id="clearBtn" class="btn-light">清空</button>
+          </div>
+          <div id="status" class="status"></div>
+        </div>
+
+        <div class="card" id="result" style="display:none;"></div>
+      </section>
+
+      <p class="legal"><a href="/terms" target="_blank">服务条款</a> · <a href="/privacy" target="_blank">隐私政策</a></p>
+    </div>
+
+    <script src="/_nav.js"></script>
+    <script>
+      const statusEl = document.getElementById("status");
+      const resultEl = document.getElementById("result");
+      const genBtn = document.getElementById("genBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      function setStatus(text, ok=false){
+        statusEl.textContent = text;
+        statusEl.className = ok ? "status ok" : "status";
+      }
+
+      clearBtn.addEventListener("click", () => {
+        ["theme","style","roles","length","constraints"].forEach((id) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          if (id === "length") el.value = "8";
+          else el.value = "";
+        });
+        resultEl.style.display = "none";
+        setStatus("已清空。", true);
+      });
+
+      genBtn.addEventListener("click", async () => {
+        genBtn.disabled = true;
+        setStatus("正在生成分镜脚本...", false);
+        try{
+          const theme = document.getElementById("theme").value.trim();
+          const style = document.getElementById("style").value.trim();
+          const roles = document.getElementById("roles").value.trim();
+          const length = Number(document.getElementById("length").value || "8");
+          const constraints = document.getElementById("constraints").value.trim();
+          if (!theme) throw new Error("请填写题材/主题");
+          if (!roles) throw new Error("请填写角色设定");
+
+          const res = await fetch("/api/ai/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              scene: "comic",
+              user_goal: "生成漫剧分镜脚本",
+              context: { theme, style, roles, length, constraints }
+            })
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          resultEl.innerHTML = `
+            <h3>分镜</h3>
+            <p class="hint">来源：${data.provider}</p>
+            <div class="box"><h4>脚本</h4><div style="white-space:pre-wrap; line-height:1.75;">${escapeHtml(data.text || "")}</div></div>
+          `;
+          resultEl.style.display = "block";
+          setStatus("完成。", true);
+          resultEl.scrollIntoView({ behavior: "smooth", block: "start" });
+        }catch(e){
+          setStatus("失败：" + String(e?.message || e), false);
+        }finally{
+          genBtn.disabled = false;
+        }
+      });
+
+      function escapeHtml(s){
+        return String(s)
+          .replaceAll("&","&amp;")
+          .replaceAll("<","&lt;")
+          .replaceAll(">","&gt;")
+          .replaceAll('"',"&quot;")
+          .replaceAll("'","&#39;");
+      }
+    </script>
+  </body>
+</html>
+

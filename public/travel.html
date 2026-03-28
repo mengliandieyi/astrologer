@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知行馆 · 行旅筹划</title>
+    <link rel="stylesheet" href="/_ui.css" />
+  </head>
+  <body>
+    <div class="app-shell motion-in">
+      <div id="topbar"></div>
+
+      <section class="hero">
+        <div class="hero-kicker">Travel</div>
+        <h1>行旅筹划 · 灵犀行程</h1>
+        <p>定城、定日、定预算；给你一份可执行的行程与清单。</p>
+        <div class="badges">
+          <span class="badge">行程生成</span>
+          <span class="badge">预算拆分</span>
+          <span class="badge">打包清单</span>
+          <span class="badge">POI增强（规划中）</span>
+        </div>
+      </section>
+
+      <section class="layout-2col">
+        <div class="card">
+          <h3>输入</h3>
+          <p class="hint">先做无外部依赖版本：不用接地图也能给你清晰、可执行的行程。</p>
+          <div class="grid">
+            <div class="full">
+              <label>目的地</label>
+              <input id="dest" placeholder="例如：东京 / 成都 / 云南大理" />
+            </div>
+            <div>
+              <label>出行天数</label>
+              <input id="days" type="number" min="1" max="30" value="5" />
+            </div>
+            <div>
+              <label>预算（人民币）</label>
+              <input id="budget" type="number" min="0" value="6000" />
+            </div>
+            <div class="full">
+              <label>偏好</label>
+              <input id="prefs" placeholder="例如：美食、轻徒步、摄影、慢节奏、亲子" />
+            </div>
+            <div class="full">
+              <label>限制/注意</label>
+              <input id="constraints" placeholder="例如：不吃辣；每天不超过2个景点；需要下午休息" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="genBtn" class="btn-primary">生成灵犀行程</button>
+            <button id="clearBtn" class="btn-light">清空</button>
+          </div>
+          <div id="status" class="status"></div>
+        </div>
+
+        <div class="card" id="result" style="display:none;"></div>
+      </section>
+
+      <p class="legal"><a href="/terms" target="_blank">服务条款</a> · <a href="/privacy" target="_blank">隐私政策</a></p>
+    </div>
+
+    <script src="/_nav.js"></script>
+    <script>
+      const statusEl = document.getElementById("status");
+      const resultEl = document.getElementById("result");
+      const genBtn = document.getElementById("genBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      function setStatus(text, ok=false){
+        statusEl.textContent = text;
+        statusEl.className = ok ? "status ok" : "status";
+      }
+
+      clearBtn.addEventListener("click", () => {
+        ["dest","days","budget","prefs","constraints"].forEach((id) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          if (id === "days") el.value = "5";
+          else if (id === "budget") el.value = "6000";
+          else el.value = "";
+        });
+        resultEl.style.display = "none";
+        setStatus("已清空。", true);
+      });
+
+      genBtn.addEventListener("click", async () => {
+        genBtn.disabled = true;
+        setStatus("正在生成灵犀行程...", false);
+        try{
+          const dest = document.getElementById("dest").value.trim();
+          const days = Number(document.getElementById("days").value || "0");
+          const budget = Number(document.getElementById("budget").value || "0");
+          const prefs = document.getElementById("prefs").value.trim();
+          const constraints = document.getElementById("constraints").value.trim();
+          if (!dest) throw new Error("请填写目的地");
+          if (!days || days < 1) throw new Error("请填写正确的天数");
+
+          const res = await fetch("/api/ai/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              scene: "travel",
+              user_goal: "生成可执行旅行计划",
+              context: { dest, days, budget, prefs, constraints }
+            })
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          resultEl.innerHTML = `
+            <h3>行程</h3>
+            <p class="hint">来源：${data.provider}</p>
+            <div class="box"><h4>行程/预算/清单</h4><div style="white-space:pre-wrap; line-height:1.75;">${escapeHtml(data.text || "")}</div></div>
+          `;
+          resultEl.style.display = "block";
+          setStatus("完成。", true);
+          resultEl.scrollIntoView({ behavior: "smooth", block: "start" });
+        }catch(e){
+          setStatus("失败：" + String(e?.message || e), false);
+        }finally{
+          genBtn.disabled = false;
+        }
+      });
+
+      function escapeHtml(s){
+        return String(s)
+          .replaceAll("&","&amp;")
+          .replaceAll("<","&lt;")
+          .replaceAll(">","&gt;")
+          .replaceAll('"',"&quot;")
+          .replaceAll("'","&#39;");
+      }
+    </script>
+  </body>
+</html>
+

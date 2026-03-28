@@ -1,0 +1,42 @@
+# 站点：dieyi.vip → 本机 astrologer（默认 PORT=3001）
+#
+# 1) DNS：在域名解析里为 dieyi.vip（及可选 www）添加 A 记录 → 服务器公网 IP
+# 2) 复制本文件到服务器，例如：
+#    sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/astrologer
+#    sudo ln -sf /etc/nginx/sites-available/astrologer /etc/nginx/sites-enabled/
+#    sudo nginx -t && sudo systemctl reload nginx
+# 3) HTTPS（推荐）：证书签发后由 Certbot 改写配置，或先跑：
+#    sudo certbot --nginx -d dieyi.vip -d www.dieyi.vip
+
+server {
+  listen 80;
+  server_name dieyi.vip www.dieyi.vip;
+  client_max_body_size 10m;
+
+  location / {
+    proxy_pass http://127.0.0.1:3001;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+
+# Certbot 成功后会自动增加 listen 443 ssl 与证书路径；若手动配置 HTTPS，可参考：
+#
+# server {
+#   listen 443 ssl http2;
+#   server_name dieyi.vip www.dieyi.vip;
+#   ssl_certificate     /etc/letsencrypt/live/dieyi.vip/fullchain.pem;
+#   ssl_certificate_key /etc/letsencrypt/live/dieyi.vip/privkey.pem;
+#   client_max_body_size 10m;
+#   location / {
+#     proxy_pass http://127.0.0.1:3001;
+#     proxy_http_version 1.1;
+#     proxy_set_header Host $host;
+#     proxy_set_header X-Real-IP $remote_addr;
+#     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#     proxy_set_header X-Forwarded-Proto $scheme;
+#   }
+# }
