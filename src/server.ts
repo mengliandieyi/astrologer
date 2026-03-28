@@ -759,6 +759,7 @@ async function generateGenericAiText(prompt: string): Promise<string> {
       body: JSON.stringify({
         model,
         temperature: 0.5,
+        enable_thinking: false,
         messages: [
           { role: "system", content: "你是严谨、结构化、可执行的助手。" },
           { role: "user", content: prompt },

@@ -105,9 +105,11 @@ async function generateAiReadingSerial(input: AiInput, apiKey: string): Promise<
 4) 风险提醒与行动清单（3条）
 `.trim();
 
+  // 通义 Qwen3 等非流式调用需显式关闭思考链，否则可能更慢或触发兼容层校验
   const body = JSON.stringify({
     model,
     temperature: 0.6,
+    enable_thinking: false,
     messages: [
       { role: "system", content: "你是严谨、可执行的命理分析助手。" },
       { role: "user", content: prompt },
