@@ -5,6 +5,9 @@ import { HomePage } from "./pages/home/HomePage";
 import { Workspace } from "./pages/workspace/Workspace";
 import { Placeholder } from "./pages/workspace/Placeholder";
 import { BaziPage } from "./pages/bazi/BaziPage";
+import { Login } from "./pages/auth/Login";
+import { Register } from "./pages/auth/Register";
+import { MyCharts } from "./pages/workspace/MyCharts";
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -19,6 +22,9 @@ function AnimatedRoutes() {
         <Routes location={location}>
           <Route path="/" element={<HomePage />} />
           <Route path="/workspace" element={<Workspace />} />
+          <Route path="/my/charts" element={<MyCharts />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
           <Route path="/bazi" element={<BaziPage />} />
           <Route path="/stocks" element={<Placeholder title="资研参详" hint="将接入结构化摘要/风险清单与历史记录。" />} />
           <Route path="/travel" element={<Placeholder title="行旅筹划" hint="将接入行程生成、预算拆分与清单。" />} />

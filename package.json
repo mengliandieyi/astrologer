@@ -16,15 +16,19 @@
     "backup": "./scripts/backup-sqlite.sh"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.2",
     "dotenv": "^17.3.1",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
     "lunar-javascript": "^1.7.7",
     "luxon": "^3.7.2",
+    "mysql2": "^3.15.1",
     "pg": "^8.20.0",
     "solarlunar": "^3.1.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/luxon": "^3.7.1",
     "@types/node": "^22.13.10",
     "@types/pg": "^8.20.0",

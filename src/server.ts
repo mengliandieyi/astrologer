@@ -12,10 +12,26 @@ import { calculateBaziFromSolar } from "./lib/baziCalculator.js";
 import { generateAiReading } from "./lib/aiClient.js";
 import { enrichChartFortuneCycles } from "./lib/enrichChartFortunes.js";
 import {
+  createUser,
+  getUserById,
+  getUserByUsername,
+  signAuthToken,
+  validatePassword,
+  validateUsername,
+  verifyAuthToken,
+  verifyPassword,
+} from "./lib/auth.js";
+import {
+  createProfile,
+  deleteProfile,
+  ensureDefaultProfile,
   getAiReadingCache,
   getChart,
   getMetrics,
   getStorageMode,
+  listChartsByProfile,
+  listChartsByUser,
+  listProfilesByUser,
   saveAiReadingCache,
   saveChart,
 } from "./lib/store.js";
@@ -205,6 +221,54 @@ app.use("/api", (req, res, next) => {
   return next();
 });
 
+function parseCookies(req: express.Request): Record<string, string> {
+  const raw = req.header("cookie") || "";
+  if (!raw) return {};
+  const out: Record<string, string> = {};
+  for (const part of raw.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (!k) continue;
+    out[k] = decodeURIComponent(rest.join("=") || "");
+  }
+  return out;
+}
+
+function cookieSecure(req: express.Request): boolean {
+  const xf = String(req.header("x-forwarded-proto") || "").toLowerCase();
+  return Boolean(req.secure || xf === "https");
+}
+
+function setAuthCookie(res: express.Response, token: string, secure: boolean) {
+  const attrs = [
+    `auth_token=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${14 * 24 * 3600}`,
+  ];
+  if (secure) attrs.push("Secure");
+  res.setHeader("Set-Cookie", attrs.join("; "));
+}
+
+function clearAuthCookie(res: express.Response, secure: boolean) {
+  const attrs = ["auth_token=", "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
+  if (secure) attrs.push("Secure");
+  res.setHeader("Set-Cookie", attrs.join("; "));
+}
+
+function getAuthedUserId(req: express.Request): number | null {
+  const token = parseCookies(req).auth_token || "";
+  const payload = token ? verifyAuthToken(token) : null;
+  return payload?.uid ?? null;
+}
+
+function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const uid = getAuthedUserId(req);
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+  (req as any).userId = uid;
+  return next();
+}
+
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
   const token = process.env.ADMIN_TOKEN;
   if (!token) return next();
@@ -213,8 +277,107 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
   return next();
 }
 
-app.post("/api/bazi/calculate", async (req, res) => {
-  const { birth_date, birth_time, timezone, location, calendar_type, gender } = req.body ?? {};
+app.get("/api/auth/me", async (req, res) => {
+  const uid = getAuthedUserId(req);
+  if (!uid) return res.json({ logged_in: false });
+  const u = await getUserById(uid);
+  if (!u) return res.json({ logged_in: false });
+  return res.json({ logged_in: true, user: u });
+});
+
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const username = validateUsername(String(req.body?.username ?? ""));
+    const password = validatePassword(String(req.body?.password ?? ""));
+    const u = await createUser(username, password);
+    const token = signAuthToken(u.id);
+    setAuthCookie(res, token, cookieSecure(req));
+    return res.json({ user: { id: u.id, username: u.username } });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const username = validateUsername(String(req.body?.username ?? ""));
+    const password = validatePassword(String(req.body?.password ?? ""));
+    const u = await getUserByUsername(username);
+    if (!u) return res.status(401).json({ error: "invalid_credentials" });
+    const ok = await verifyPassword(password, u.password_hash);
+    if (!ok) return res.status(401).json({ error: "invalid_credentials" });
+    const token = signAuthToken(u.id);
+    setAuthCookie(res, token, cookieSecure(req));
+    return res.json({ user: { id: u.id, username: u.username } });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  clearAuthCookie(res, cookieSecure(req));
+  return res.status(204).send();
+});
+
+app.get("/api/me/charts", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const limit = Number(req.query.limit ?? 30);
+  try {
+    const rows = await listChartsByUser(uid, Number.isFinite(limit) ? limit : 30);
+    return res.json({ charts: rows });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get("/api/me/profiles", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  try {
+    const profiles = await listProfilesByUser(uid);
+    return res.json({ profiles });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/me/profiles", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  try {
+    const name = String(req.body?.name ?? "");
+    const p = await createProfile(uid, name);
+    return res.json({ profile: p });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.delete("/api/me/profiles/:profileId", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const pid = Number(req.params.profileId ?? "");
+  if (!Number.isFinite(pid) || pid <= 0) return res.status(400).json({ error: "profile_id_required" });
+  try {
+    await deleteProfile(uid, pid);
+    return res.status(204).send();
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get("/api/me/profiles/:profileId/charts", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const pid = Number(req.params.profileId ?? "");
+  const limit = Number(req.query.limit ?? 30);
+  if (!Number.isFinite(pid) || pid <= 0) return res.status(400).json({ error: "profile_id_required" });
+  try {
+    const rows = await listChartsByProfile(uid, pid, Number.isFinite(limit) ? limit : 30);
+    return res.json({ charts: rows });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/bazi/calculate", requireAuth, async (req, res) => {
+  const { birth_date, birth_time, timezone, location, calendar_type, gender, profile_id } = req.body ?? {};
   if (!birth_date || !birth_time || !timezone || !location) {
     return res.status(400).json({ error: "missing_required_fields" });
   }
@@ -229,6 +392,10 @@ app.post("/api/bazi/calculate", async (req, res) => {
   }
 
   try {
+    const userId = (req as any).userId as number;
+    const pidRaw = Number(profile_id ?? "");
+    const profileId =
+      Number.isFinite(pidRaw) && pidRaw > 0 ? Math.floor(pidRaw) : await ensureDefaultProfile(userId);
     const chartId = crypto.randomUUID();
     const g = Number(gender) === 0 ? 0 : 1;
     const calc = calculateBaziFromSolar(
@@ -262,7 +429,12 @@ app.post("/api/bazi/calculate", async (req, res) => {
       birth_meta: calc.birth_meta,
       user_readable: calc.user_readable,
     };
-    await saveChart({ ...output, created_at: new Date().toISOString() });
+    await saveChart({
+      ...output,
+      created_at: new Date().toISOString(),
+      user_id: userId,
+      profile_id: profileId,
+    });
     return res.json(output);
   } catch {
     return res.status(422).json({ error: "invalid_birth_datetime" });

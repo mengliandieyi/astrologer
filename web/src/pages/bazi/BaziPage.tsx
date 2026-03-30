@@ -4,6 +4,7 @@ import { RegionCombobox } from "../../components/bazi/RegionCombobox";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { TIMEZONE_OPTIONS_ZH } from "../../lib/timezonesZh";
+import { authMe, createProfile, listProfiles, type Profile } from "../../lib/authClient";
 
 type ChinaRegionModule = typeof import("../../lib/chinaRegion");
 
@@ -432,6 +433,36 @@ export function BaziPage() {
   >(null);
   const [shareUrl, setShareUrl] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [authLoggedIn, setAuthLoggedIn] = useState(false);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void authMe()
+      .then((m) => {
+        if (cancelled) return;
+        const logged = Boolean((m as any)?.logged_in);
+        setAuthLoggedIn(logged);
+        if (!logged) return;
+        return listProfiles()
+          .then((out) => {
+            if (cancelled) return;
+            const ps = (out.profiles || []) as Profile[];
+            setProfiles(ps);
+            setActiveProfileId(ps[0]?.id ?? null);
+          })
+          .catch(() => {
+            if (!cancelled) setProfiles([]);
+          });
+      })
+      .catch(() => {
+        if (!cancelled) setAuthLoggedIn(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const liuNian = useMemo(
     () => chart?.fortune_cycles?.liu_nian_preview?.slice(0, 12) ?? [],
@@ -522,6 +553,14 @@ export function BaziPage() {
   }
 
   async function run() {
+    if (!authLoggedIn) {
+      setStatus("请先登录后再排盘（登录后可保存历史记录）。", "error");
+      return;
+    }
+    if (!activeProfileId) {
+      setStatus("请先选择/创建一个“人物”。", "error");
+      return;
+    }
     setBusy(true);
     setShareUrl("");
     setShowAiReading(false);
@@ -541,6 +580,7 @@ export function BaziPage() {
         location,
         calendar_type: calendarType,
         gender,
+        profile_id: activeProfileId,
       });
       setChart(c);
       await track("report_view");
@@ -707,6 +747,61 @@ export function BaziPage() {
 
       <section className="mt-2 grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
         <div className="home-landing-surface min-w-0 p-5 sm:p-6">
+          {!authLoggedIn ? (
+            <div className="home-landing-surface-inset mb-4 px-4 py-3 text-sm text-[var(--text-main)]">
+              你还未登录：排盘计算已开启登录保护。请先{" "}
+              <Link
+                className="underline decoration-[rgba(74,120,108,0.45)] underline-offset-4"
+                to={`/login?next=${encodeURIComponent(`/bazi${window.location.search || ""}`)}`}
+              >
+                登录
+              </Link>{" "}
+              或{" "}
+              <Link
+                className="underline decoration-[rgba(74,120,108,0.45)] underline-offset-4"
+                to={`/register?next=${encodeURIComponent(`/bazi${window.location.search || ""}`)}`}
+              >
+                注册
+              </Link>
+              。
+            </div>
+          ) : null}
+          {authLoggedIn ? (
+            <div className="mb-3 flex flex-wrap items-end gap-2">
+              <div className="min-w-[14rem]">
+                <label className="text-xs font-semibold text-[var(--text-muted)]">人物</label>
+                <select
+                  className={InputClassName()}
+                  value={String(activeProfileId ?? "")}
+                  onChange={(e) => setActiveProfileId(Number(e.target.value) || null)}
+                >
+                  <option value="">请选择人物</option>
+                  {profiles.map((p) => (
+                    <option key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                variant="secondary"
+                onClick={async () => {
+                  try {
+                    const name = window.prompt("新人物名称（例如：我/妈妈/孩子）")?.trim() || "";
+                    if (!name) return;
+                    const out = await createProfile(name);
+                    const next = [out.profile, ...profiles];
+                    setProfiles(next);
+                    setActiveProfileId(out.profile.id);
+                  } catch (e: any) {
+                    setStatus(`创建人物失败：${explainError(String(e?.message || e))}`, "error");
+                  }
+                }}
+              >
+                新建人物
+              </Button>
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <FormField label="出生日期">
               <input
@@ -820,7 +915,12 @@ export function BaziPage() {
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
-            <Button variant={aiAnalystMode ? "secondary" : "primary"} onClick={() => void run()} disabled={busy}>
+            <Button
+              variant={aiAnalystMode ? "secondary" : "primary"}
+              onClick={() => void run()}
+              disabled={busy || !authLoggedIn}
+              title={!authLoggedIn ? "请先登录后再排盘" : undefined}
+            >
               开始排盘
             </Button>
             <Button
