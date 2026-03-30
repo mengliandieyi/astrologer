@@ -4,6 +4,28 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { authLogin } from "../../lib/authClient";
 
+function explainAuthError(raw: string): string {
+  const s = (raw || "").trim();
+  try {
+    const j = JSON.parse(s);
+    const code = String(j?.error || "");
+    if (code === "username_required") return "请输入用户名";
+    if (code === "password_required") return "请输入密码";
+    if (code === "invalid_credentials") return "用户名或密码错误";
+    if (code === "username_invalid_length") return "用户名长度需 3–64";
+    if (code === "username_invalid_chars") return "用户名仅支持字母/数字/下划线/@/点";
+    if (code === "password_invalid_length") return "密码长度需 8–72";
+    if (code) return code;
+  } catch {
+    // ignore
+  }
+  return s.slice(0, 160) || "登录失败";
+}
+
+const inputCls =
+  "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-900 outline-none focus:border-slate-400";
+const labelCls = "text-sm text-slate-600";
+
 function useNextParam() {
   const loc = useLocation();
   return useMemo(() => {
@@ -43,18 +65,18 @@ export function Login() {
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="space-y-1">
-              <label className="text-sm text-slate-200/80">用户名</label>
+              <label className={labelCls}>用户名</label>
               <input
-                className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-slate-100 outline-none focus:border-white/25"
+                className={inputCls}
                 value={username}
                 autoComplete="username"
                 onChange={(e) => setUsername(e.target.value)}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-sm text-slate-200/80">密码</label>
+              <label className={labelCls}>密码</label>
               <input
-                className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-slate-100 outline-none focus:border-white/25"
+                className={inputCls}
                 value={password}
                 type="password"
                 autoComplete="current-password"
@@ -64,7 +86,7 @@ export function Login() {
                 }}
               />
             </div>
-            {err ? <div className="text-sm text-red-300">{err}</div> : null}
+            {err ? <div className="text-sm text-red-600">{explainAuthError(err)}</div> : null}
             <div className="flex items-center justify-between gap-3 pt-2">
               <Button variant="secondary" asChild>
                 <Link to={`/register?next=${encodeURIComponent(next)}`}>去注册</Link>
