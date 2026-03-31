@@ -1,4 +1,7 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+// In production we rely on project `.env` as the source of truth.
+// PM2 may inject env vars first; without override, dotenv will NOT replace them.
+dotenv.config({ override: true });
 import express from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
