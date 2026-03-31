@@ -1,5 +1,19 @@
 # 灵犀 /api/reports/ai 常需 60s+，默认反代超时过短会导致浏览器 Failed to fetch
+
+# 移动端兼容建议：
+# - 禁用 HTTP/3(QUIC)：部分移动网络/机型会因 UDP/443 不稳定导致“已丢失网络连接”
+# - 强制 RSA 证书：部分终端对 ECDSA 证书兼容性较差
+{
+  servers {
+    protocols h1 h2
+  }
+}
+
 your-domain.com, www.your-domain.com {
+  tls {
+    key_type rsa2048
+  }
+
   encode gzip zstd
   reverse_proxy 127.0.0.1:3001 {
     transport http {
