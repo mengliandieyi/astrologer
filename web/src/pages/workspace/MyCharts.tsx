@@ -2,7 +2,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
-import { authLogout, authMe, listChartsByProfile, listProfiles, type Profile } from "../../lib/authClient";
+import { authMe, listChartsByProfile, listProfiles, type Profile } from "../../lib/authClient";
 
 function formatTime(s: string) {
   const t = s.replace("T", " ").replace("Z", "");
@@ -54,11 +54,6 @@ export function MyCharts() {
     };
   }, [nav, next]);
 
-  async function logout() {
-    await authLogout();
-    nav("/login?next=/workspace");
-  }
-
   return (
     <div className="prompt-stage">
       <div className="mx-auto w-full max-w-4xl px-4 pb-10">
@@ -70,9 +65,6 @@ export function MyCharts() {
             </Button>
             <Button asChild variant="ghost" size="sm">
               <Link to="/bazi">八字</Link>
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => void logout()}>
-              退出登录
             </Button>
           </div>
         </div>

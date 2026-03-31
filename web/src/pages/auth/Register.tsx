@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { authRegister } from "../../lib/authClient";
 
 function explainAuthError(raw: string): string {
@@ -10,6 +10,9 @@ function explainAuthError(raw: string): string {
     const j = JSON.parse(s);
     const code = String(j?.error || "");
     if (code === "username_required") return "请输入用户名";
+    if (code === "email_required") return "请输入邮箱";
+    if (code === "email_invalid") return "邮箱格式不正确";
+    if (code === "email_taken") return "邮箱已被占用";
     if (code === "password_required") return "请输入密码";
     if (code === "username_taken") return "用户名已被占用";
     if (code === "username_invalid_length") return "用户名长度需 3–64";
@@ -30,7 +33,7 @@ function useNextParam() {
   const loc = useLocation();
   return useMemo(() => {
     const sp = new URLSearchParams(loc.search);
-    return sp.get("next") || "/workspace";
+    return sp.get("next") || "/";
   }, [loc.search]);
 }
 
@@ -38,6 +41,7 @@ export function Register() {
   const nav = useNavigate();
   const next = useNextParam();
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -46,7 +50,7 @@ export function Register() {
     setErr("");
     setBusy(true);
     try {
-      await authRegister(username, password);
+      await authRegister(username, email, password);
       nav(next);
     } catch (e: any) {
       setErr(String(e?.message || "注册失败").slice(0, 160));
@@ -61,7 +65,6 @@ export function Register() {
         <Card className="glass">
           <CardHeader>
             <CardTitle>注册</CardTitle>
-            <CardDescription>用户名支持字母数字与 _ @ .；密码至少 8 位。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="space-y-1">
@@ -71,6 +74,16 @@ export function Register() {
                 value={username}
                 autoComplete="username"
                 onChange={(e) => setUsername(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className={labelCls}>邮箱</label>
+              <input
+                className={inputCls}
+                value={email}
+                type="email"
+                autoComplete="email"
+                onChange={(e) => setEmail(e.target.value)}
               />
             </div>
             <div className="space-y-1">

@@ -1,10 +1,11 @@
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { RegionCombobox } from "../../components/bazi/RegionCombobox";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { HepanPanel } from "../hepan/HepanPanel";
 import { TIMEZONE_OPTIONS_ZH } from "../../lib/timezonesZh";
-import { authMe, createProfile, listProfiles, type Profile } from "../../lib/authClient";
+import { authLogout, authMe, createProfile, getProfile, listProfiles, type Profile } from "../../lib/authClient";
 
 type ChinaRegionModule = typeof import("../../lib/chinaRegion");
 
@@ -14,6 +15,8 @@ type ShenShaItem = { name: string; type: "ji" | "xiong" | "neutral"; effect: str
 
 type ChartRecord = {
   chart_id: string;
+  /** 后端排盘缓存命中：档案未变更则复用最近一次排盘结果 */
+  from_cache?: boolean;
   /** 出生地（与排盘时省市区一致）；旧盘可能无此字段 */
   birth_location?: string;
   /** 分享回填：排盘提交的日期/时间/时区（新存盘才有） */
@@ -291,25 +294,81 @@ function PillarsShenShaGrid(props: {
 }
 
 function BaziTopbar(props: { onOpenHelp: () => void }) {
+  const nav = useNavigate();
+  const [loggedIn, setLoggedIn] = useState(false);
+  const loc = window.location.pathname + window.location.search;
+
+  useEffect(() => {
+    let cancelled = false;
+    void authMe()
+      .then((m) => {
+        if (!cancelled) setLoggedIn(Boolean((m as any)?.logged_in));
+      })
+      .catch(() => {
+        if (!cancelled) setLoggedIn(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function onLogout() {
+    try {
+      await authLogout();
+    } finally {
+      nav(`/login?next=${encodeURIComponent(loc)}`, { replace: true });
+    }
+  }
+
   return (
     <nav className="home-navbar">
       <Link to="/" className="home-logo-link" aria-label="返回首页">
         <div className="home-logo-circle" aria-hidden />
         <span className="home-logo-text">知行馆</span>
       </Link>
-      <button type="button" className="home-help-btn" onClick={props.onOpenHelp}>
-        帮助中心
-      </button>
+      <div className="home-navbar-actions">
+        <button type="button" className="home-help-btn" onClick={props.onOpenHelp}>
+          帮助中心
+        </button>
+        {loggedIn ? (
+          <Button variant="secondary" size="sm" onClick={() => void onLogout()}>
+            退出登录
+          </Button>
+        ) : null}
+      </div>
     </nav>
   );
 }
 
 function explainError(message: string): string {
   if (!message) return "请求失败，请稍后重试";
+  // Backend often returns JSON like {"error":"xxx","detail":"..."} as plain text.
+  try {
+    const j = JSON.parse(message);
+    const code = String(j?.error || "");
+    const detail = String(j?.detail || "");
+    const merged = `${code}${detail ? `:${detail}` : ""}`;
+    // Re-run mapping on merged string.
+    return explainError(merged);
+  } catch {
+    // ignore
+  }
   if (message.includes("missing_required_fields")) return "必填项未填写完整";
   if (message.includes("invalid_birth_datetime_format")) return "出生日期或时间格式不正确";
+  if (message.includes("invalid_birth_datetime")) {
+    if (message.includes("invalid_datetime")) {
+      return "出生时间无效：请检查生日/出生时间/时区是否正确。";
+    }
+    if (message.includes("invalid_lunar_datetime")) {
+      return "农历出生日期无效：请核对农历年月日是否存在、以及「闰月」开关是否勾对（仅闰 X 月时才需要勾选）。";
+    }
+    return "出生信息无效：请到「我的档案」检查历法（阳历/阴历）与生日是否匹配，以及省/市/区是否完整。";
+  }
+  if (message.includes("profile_incomplete")) return "档案信息未完善：请先补全历法、生日、出生时间、时区与省/市/区。";
   if (message.includes("invalid_timezone")) return "时区无效，请从列表中选择";
   if (message.includes("invalid_location")) return "出生地格式不正确，请用中文/英文城市名";
+  if (message.includes("profile_name_required")) return "请输入档案名称";
+  if (message.includes("profile_name_taken")) return "该档案名已存在，请换一个";
   if (message.includes("too_many_requests")) return "请求过于频繁，请稍后再试";
   if (message.includes("chart_id_and_anon_id_required")) return "缺少 anon_id";
   if (message.includes("chart_not_found")) return "排盘不存在或已过期";
@@ -370,9 +429,23 @@ function ComboInputClassName() {
 }
 
 export function BaziPage() {
-  const [params] = useSearchParams();
+  const nav = useNavigate();
+  const [params, setParams] = useSearchParams();
   const chartIdFromQuery = params.get("chart_id") || "";
   const fromShare = Boolean(chartIdFromQuery);
+  const tabFromQuery = String(params.get("tab") || "").trim().toLowerCase();
+  const initialTab: "bazi" | "hepan" = tabFromQuery === "hepan" ? "hepan" : "bazi";
+  const profileIdFromQuery = useMemo(() => {
+    const raw = String(params.get("profile_id") || "").trim();
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [params]);
+
+  const [activeTab, setActiveTab] = useState<"bazi" | "hepan">(initialTab);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   const [birthDate, setBirthDate] = useState("1998-10-21");
   const [birthTime, setBirthTime] = useState("09:20");
@@ -434,8 +507,15 @@ export function BaziPage() {
   const [shareUrl, setShareUrl] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
   const [authLoggedIn, setAuthLoggedIn] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
+  const [archiveLocation, setArchiveLocation] = useState("");
+  const [createArchiveOpen, setCreateArchiveOpen] = useState(false);
+  const [createArchiveName, setCreateArchiveName] = useState("");
+  const [createArchiveErr, setCreateArchiveErr] = useState("");
+  const [creatingArchive, setCreatingArchive] = useState(false);
+  const createArchiveInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -450,7 +530,11 @@ export function BaziPage() {
             if (cancelled) return;
             const ps = (out.profiles || []) as Profile[];
             setProfiles(ps);
-            setActiveProfileId(ps[0]?.id ?? null);
+            if (profileIdFromQuery && ps.some((p) => p.id === profileIdFromQuery)) {
+              setActiveProfileId(profileIdFromQuery);
+            } else {
+              setActiveProfileId(ps[0]?.id ?? null);
+            }
           })
           .catch(() => {
             if (!cancelled) setProfiles([]);
@@ -458,11 +542,76 @@ export function BaziPage() {
       })
       .catch(() => {
         if (!cancelled) setAuthLoggedIn(false);
+      })
+      .finally(() => {
+        if (!cancelled) setAuthChecked(true);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [profileIdFromQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!authLoggedIn || !activeProfileId) {
+      return;
+    }
+    void getProfile(activeProfileId)
+      .then((out) => {
+        if (cancelled) return;
+        const p = out.profile as Profile;
+        const meta = (p.meta ?? {}) as Record<string, unknown>;
+        const bd = typeof meta.birth_date === "string" ? meta.birth_date.trim() : "";
+        const bt = typeof meta.birth_time === "string" ? meta.birth_time.trim() : "";
+        const tz = typeof meta.birth_timezone === "string" ? meta.birth_timezone.trim() : "";
+        const cal = typeof meta.birth_calendar_type === "string" ? meta.birth_calendar_type.trim().toLowerCase() : "";
+        const region =
+          meta.birth_region && typeof meta.birth_region === "object"
+            ? (meta.birth_region as any as { province?: string; city?: string; district?: string })
+            : null;
+        const locFromRegion = `${String(region?.province || "")}${String(region?.city || "")}${String(region?.district || "")}`.trim();
+        const loc = (typeof meta.birth_location === "string" ? meta.birth_location.trim() : "") || locFromRegion;
+        const g = meta.gender === 0 || meta.gender === 1 ? meta.gender : Number(meta.gender) === 0 ? 0 : 1;
+        if (bd) setBirthDate(bd);
+        if (bt) setBirthTime(normalizeBirthTimeForForm(bt));
+        if (tz) setTimezone(tz);
+        setCalendarType(cal === "lunar" ? "lunar" : "solar");
+        setArchiveLocation(loc);
+        if (region?.province) setProvince(String(region.province));
+        if (region?.city) setCity(String(region.city));
+        if (region?.district) setCounty(String(region.district));
+        if (loc && !(region?.province || region?.city || region?.district)) {
+          void import("../../lib/chinaRegion").then((m) => {
+            if (cancelled) return;
+            const r = m.deriveRegionTripleFromLocation(loc);
+            if (r.province) setProvince(r.province);
+            if (r.city) setCity(r.city);
+            if (r.district) setCounty(r.district);
+          });
+        }
+        setGender(g);
+      })
+      .catch(() => {
+        // ignore
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoggedIn, activeProfileId]);
+
+  const timezoneLabel = useMemo(() => {
+    const t = (timezone || "").trim();
+    if (!t) return "";
+    return TIMEZONE_OPTIONS_ZH.find((x) => x.iana === t)?.labelZh || t;
+  }, [timezone]);
+
+  useEffect(() => {
+    if (!createArchiveOpen) return;
+    setCreateArchiveErr("");
+    const t = window.setTimeout(() => createArchiveInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [createArchiveOpen]);
 
   const liuNian = useMemo(
     () => chart?.fortune_cycles?.liu_nian_preview?.slice(0, 12) ?? [],
@@ -475,6 +624,14 @@ export function BaziPage() {
 
   const fiveElLabel = (k: string) =>
     k === "wood" ? "木" : k === "fire" ? "火" : k === "earth" ? "土" : k === "metal" ? "金" : k === "water" ? "水" : k;
+
+  const strengthLevelLabel = useMemo(() => {
+    const v = chart?.day_master?.strength_level;
+    if (v === "weak") return "偏弱";
+    if (v === "strong") return "偏强";
+    if (v === "balanced") return "中和";
+    return v || "";
+  }, [chart?.day_master?.strength_level]);
 
   async function track(event_name: string, extra?: Record<string, unknown>) {
     try {
@@ -552,13 +709,13 @@ export function BaziPage() {
     }
   }
 
-  async function run() {
+  async function run(opts?: { refresh?: boolean }) {
     if (!authLoggedIn) {
       setStatus("请先登录后再排盘（登录后可保存历史记录）。", "error");
       return;
     }
     if (!activeProfileId) {
-      setStatus("请先选择/创建一个“人物”。", "error");
+      setStatus("请先选择/创建一个“档案”。", "error");
       return;
     }
     setBusy(true);
@@ -569,22 +726,18 @@ export function BaziPage() {
     setAiAnalystMode(null);
     setStatus("正在排盘并生成报告...", "pending");
     try {
-      if (!regionMod) throw new Error("行政区数据加载中，请稍候再试");
-      if (!birthDate || !birthTime || !regionMod.isValidTriple(province, city, county)) {
-        throw new Error("请先填写出生信息，并完整选择出生地（省/市/区县）");
-      }
       const c = await postJson<ChartRecord>("/api/bazi/calculate", {
-        birth_date: birthDate,
-        birth_time: birthTime,
-        timezone,
-        location,
-        calendar_type: calendarType,
-        gender,
         profile_id: activeProfileId,
+        refresh: Boolean(opts?.refresh),
       });
       setChart(c);
       await track("report_view");
-      setStatus("完成：右侧为命盘数据；需要时再点「全项」等查看灵犀解读。", "success");
+      setStatus(
+        c.from_cache
+          ? "已复用最近一次排盘结果（档案未变更）。"
+          : "完成：右侧为命盘数据；需要时再点「全项」等查看灵犀解读。",
+        "success"
+      );
     } catch (e) {
       setStatus(`失败：${explainError((e as any)?.message || "")}`, "error");
     } finally {
@@ -595,7 +748,8 @@ export function BaziPage() {
   async function genAi(
     mode: "full" | "career" | "wealth" | "love" | "children" | "kinship" | "health" | "study" = "full",
     /** 排盘刚返回时传入，避免 setState 尚未提交导致读不到 chart */
-    chartOverride?: ChartRecord | null
+    chartOverride?: ChartRecord | null,
+    opts?: { refresh?: boolean }
   ) {
     if (genAiInFlightRef.current) return;
     genAiInFlightRef.current = true;
@@ -604,8 +758,29 @@ export function BaziPage() {
       genAiInFlightRef.current = false;
       return;
     }
-    /** 与按钮文案一致：同一维度再次点击 → refresh=1 强制重新生成 */
-    const sameModeAgain = aiAnalystMode === mode;
+    // Cache-first UX: if user clicks the same mode again and we already have text,
+    // don't re-request; keep current result unless user explicitly refreshes.
+    if (!opts?.refresh && showAiReading && aiAnalystMode === mode && aiText.trim()) {
+      const modeLabel =
+        mode === "career"
+          ? "事业"
+          : mode === "wealth"
+            ? "财运"
+            : mode === "love"
+              ? "婚恋"
+              : mode === "children"
+                ? "子女"
+                : mode === "kinship"
+                  ? "六亲"
+                  : mode === "health"
+                    ? "健康"
+                    : mode === "study"
+                      ? "学业"
+                      : "全项";
+      setStatus(`解读已就绪（${modeLabel}）`, "success");
+      genAiInFlightRef.current = false;
+      return;
+    }
     setShowAiReading(true);
     const previousAi = aiText;
     setAiGenerating(true);
@@ -646,7 +821,7 @@ export function BaziPage() {
                     : mode === "study"
                       ? `chart_id=${id}&mode=study`
                       : `chart_id=${id}&mode=full`;
-      const refreshQ = sameModeAgain ? "&refresh=1" : "";
+      const refreshQ = opts?.refresh ? "&refresh=1" : "";
       // 避免 GET 被浏览器缓存；命中服务端缓存时响应很快
       const out = await getJsonWithTimeout<AiResp>(`/api/reports/ai?${q}${refreshQ}&_=${Date.now()}`, 300_000);
       setAiText(out.ai_text || "AI暂无返回");
@@ -654,7 +829,7 @@ export function BaziPage() {
       await track("ai_reading_view", { analyst_mode: out.analyst_mode ?? mode });
       setStatus(
         out.from_cache
-          ? `解读已就绪（${modeLabel} · ${out.provider} · 已缓存，未再调用大模型）`
+          ? `解读已就绪（${modeLabel} · ${out.provider}）`
           : `解读已完成（${modeLabel} · ${out.provider}）。`,
         "success"
       );
@@ -694,8 +869,8 @@ export function BaziPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartIdFromQuery]);
 
-  /** 大模型解读仅依赖排盘 chart_id */
-  const canGenAi = Boolean(chart?.chart_id && !busy && !aiGenerating);
+  /** 大模型解读仅依赖排盘 chart_id；不与页面 busy（排盘/分享）强耦合，避免误锁按钮 */
+  const canGenAi = Boolean(chart?.chart_id && !aiGenerating);
   const canShare = Boolean(chart?.chart_id && !busy);
 
   /**
@@ -717,11 +892,12 @@ export function BaziPage() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.classList.add("theme-bazi");
-    return () => {
-      document.documentElement.classList.remove("theme-bazi");
-    };
-  }, []);
+    if (fromShare) return;
+    if (activeTab !== "hepan") return;
+    if (!authChecked) return;
+    if (authLoggedIn) return;
+    nav(`/login?next=${encodeURIComponent("/bazi?tab=hepan")}`, { replace: true });
+  }, [activeTab, authChecked, authLoggedIn, fromShare, nav]);
 
   return (
     <div className="home-landing page-bazi pb-12">
@@ -739,13 +915,53 @@ export function BaziPage() {
             </div>
           ) : null}
         </div>
-        <Link to="/workspace" className="home-landing-mascot shrink-0" aria-label="进入工作台">
+        <Link to="/" className="home-landing-mascot shrink-0" aria-label="返回首页">
           <div className="home-landing-mascot-icon" aria-hidden />
           <div className="home-landing-mascot-text">可可爱爱小馆灵</div>
         </Link>
       </header>
 
-      <section className="mt-2 grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
+      {!fromShare ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className={
+              activeTab === "bazi"
+                ? "rounded-full border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 py-1.5 text-sm font-semibold text-[var(--text-strong)]"
+                : "rounded-full border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-[var(--text-muted)] hover:border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
+            }
+            onClick={() => {
+              setActiveTab("bazi");
+              const sp = new URLSearchParams(params);
+              sp.delete("tab");
+              setParams(sp, { replace: true });
+            }}
+          >
+            八字
+          </button>
+          <button
+            type="button"
+            className={
+              activeTab === "hepan"
+                ? "rounded-full border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 py-1.5 text-sm font-semibold text-[var(--text-strong)]"
+                : "rounded-full border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-[var(--text-muted)] hover:border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
+            }
+            onClick={() => {
+              setActiveTab("hepan");
+              const sp = new URLSearchParams(params);
+              sp.set("tab", "hepan");
+              setParams(sp, { replace: true });
+            }}
+          >
+            合盘
+          </button>
+        </div>
+      ) : null}
+
+      {activeTab === "hepan" && !fromShare ? (
+        <HepanPanel loggedIn={authLoggedIn} profiles={profiles} initialProfileIdA={activeProfileId} />
+      ) : (
+        <section className="mt-2 grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
         <div className="home-landing-surface min-w-0 p-5 sm:p-6">
           {!authLoggedIn ? (
             <div className="home-landing-surface-inset mb-4 px-4 py-3 text-sm text-[var(--text-main)]">
@@ -769,13 +985,13 @@ export function BaziPage() {
           {authLoggedIn ? (
             <div className="mb-3 flex flex-wrap items-end gap-2">
               <div className="min-w-[14rem]">
-                <label className="text-xs font-semibold text-[var(--text-muted)]">人物</label>
+                <label className="text-xs font-semibold text-[var(--text-muted)]">档案</label>
                 <select
                   className={InputClassName()}
                   value={String(activeProfileId ?? "")}
                   onChange={(e) => setActiveProfileId(Number(e.target.value) || null)}
                 >
-                  <option value="">请选择人物</option>
+                  <option value="">请选择档案</option>
                   {profiles.map((p) => (
                     <option key={p.id} value={String(p.id)}>
                       {p.name}
@@ -786,133 +1002,151 @@ export function BaziPage() {
               <Button
                 variant="secondary"
                 onClick={async () => {
-                  try {
-                    const name = window.prompt("新人物名称（例如：我/妈妈/孩子）")?.trim() || "";
-                    if (!name) return;
-                    const out = await createProfile(name);
-                    const next = [out.profile, ...profiles];
-                    setProfiles(next);
-                    setActiveProfileId(out.profile.id);
-                  } catch (e: any) {
-                    setStatus(`创建人物失败：${explainError(String(e?.message || e))}`, "error");
-                  }
+                  setCreateArchiveName("");
+                  setCreateArchiveErr("");
+                  setCreateArchiveOpen(true);
                 }}
               >
-                新建人物
+                新建档案
               </Button>
             </div>
           ) : null}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <FormField label="出生日期">
-              <input
-                className={InputClassName()}
-                type="date"
-                value={birthDate}
-                onChange={(e) => setBirthDate(e.target.value)}
-              />
-            </FormField>
-            <FormField label="出生时间">
-              <input
-                className={InputClassName()}
-                type="time"
-                value={birthTime}
-                onChange={(e) => setBirthTime(e.target.value)}
-              />
-            </FormField>
-            <FormField label="历法">
-              <select
-                className={InputClassName()}
-                value={calendarType}
-                onChange={(e) => setCalendarType((e.target.value as CalendarType) || "solar")}
-              >
-                <option value="solar">阳历（公历）</option>
-                <option value="lunar">阴历（农历）</option>
-              </select>
-            </FormField>
-            <FormField label="性别">
-              <select
-                className={InputClassName()}
-                value={String(gender)}
-                onChange={(e) => setGender(e.target.value === "0" ? 0 : 1)}
-              >
-                <option value="1">男</option>
-                <option value="0">女</option>
-              </select>
-            </FormField>
-            <FormField label="时区">
-              <select
-                className={InputClassName()}
-                value={timezone}
-                onChange={(e) => setTimezone(e.target.value)}
-              >
-                {TIMEZONE_OPTIONS_ZH.map((z) => (
-                  <option key={z.iana} value={z.iana}>
-                    {z.labelZh}
-                  </option>
-                ))}
-              </select>
-            </FormField>
-            <FormField label="出生地">
-              <div className="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <RegionCombobox
-                  value={province}
-                  disabled={!regionMod}
-                  options={provinceOptions}
-                  placeholder="省份"
-                  inputClassName={ComboInputClassName()}
-                  emptyHint="暂无省份数据"
-                  onValueChange={(v) => {
-                    setProvince(v);
-                    setCity("");
-                    setCounty("");
-                  }}
-                  onInputBlur={(v) => {
-                    if (!regionMod) return;
-                    const r = regionMod.resolveProvince(v);
-                    if (r !== v) {
-                      setProvince(r);
+          {authLoggedIn ? (
+            <div className="home-landing-surface-inset mb-4 px-4 py-3 text-sm text-[var(--text-main)]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">排盘将使用档案出生信息（不可在此页手填修改）。</span>
+                {activeProfileId ? (
+                  <Link className="underline decoration-[rgba(74,120,108,0.45)] underline-offset-4" to={`/my/profiles?edit=${encodeURIComponent(String(activeProfileId))}`}>
+                    去完善档案
+                  </Link>
+                ) : null}
+              </div>
+              <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-[var(--text-muted)] sm:grid-cols-2">
+                <div>出生日期：{birthDate || "—"}</div>
+                <div>出生时间：{birthTime || "—"}</div>
+                <div>性别：{gender === 0 ? "女" : "男"}</div>
+                <div>时区：{timezoneLabel || "—"}</div>
+                <div>出生地：{archiveLocation || location || "—"}</div>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs text-[var(--text-muted)]">
+                  历法：<span className="font-semibold text-[var(--text-main)]">{calendarType === "lunar" ? "阴历（农历）" : "阳历（公历）"}</span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <FormField label="出生日期">
+                <input
+                  className={InputClassName()}
+                  type="date"
+                  value={birthDate}
+                  onChange={(e) => setBirthDate(e.target.value)}
+                />
+              </FormField>
+              <FormField label="出生时间">
+                <input
+                  className={InputClassName()}
+                  type="time"
+                  value={birthTime}
+                  onChange={(e) => setBirthTime(e.target.value)}
+                />
+              </FormField>
+              <FormField label="历法">
+                <select
+                  className={InputClassName()}
+                  value={calendarType}
+                  onChange={(e) => setCalendarType((e.target.value as CalendarType) || "solar")}
+                >
+                  <option value="solar">阳历（公历）</option>
+                  <option value="lunar">阴历（农历）</option>
+                </select>
+              </FormField>
+              <FormField label="性别">
+                <select
+                  className={InputClassName()}
+                  value={String(gender)}
+                  onChange={(e) => setGender(e.target.value === "0" ? 0 : 1)}
+                >
+                  <option value="1">男</option>
+                  <option value="0">女</option>
+                </select>
+              </FormField>
+              <FormField label="时区">
+                <select
+                  className={InputClassName()}
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                >
+                  {TIMEZONE_OPTIONS_ZH.map((z) => (
+                    <option key={z.iana} value={z.iana}>
+                      {z.labelZh}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+              <FormField label="出生地">
+                <div className="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <RegionCombobox
+                    value={province}
+                    disabled={!regionMod}
+                    options={provinceOptions}
+                    placeholder="省份"
+                    inputClassName={ComboInputClassName()}
+                    emptyHint="暂无省份数据"
+                    onValueChange={(v) => {
+                      setProvince(v);
                       setCity("");
                       setCounty("");
-                    }
-                  }}
-                />
-                <RegionCombobox
-                  value={city}
-                  disabled={!regionMod || !province}
-                  options={cityOptions}
-                  placeholder="城市"
-                  inputClassName={ComboInputClassName()}
-                  emptyHint={province ? "暂无匹配城市" : "请先选择省份"}
-                  onValueChange={(v) => {
-                    setCity(v);
-                    setCounty("");
-                  }}
-                  onInputBlur={(v) => {
-                    if (!regionMod) return;
-                    const r = regionMod.resolveCity(province, v);
-                    if (r !== v) {
-                      setCity(r);
+                    }}
+                    onInputBlur={(v) => {
+                      if (!regionMod) return;
+                      const r = regionMod.resolveProvince(v);
+                      if (r !== v) {
+                        setProvince(r);
+                        setCity("");
+                        setCounty("");
+                      }
+                    }}
+                  />
+                  <RegionCombobox
+                    value={city}
+                    disabled={!regionMod || !province}
+                    options={cityOptions}
+                    placeholder="城市"
+                    inputClassName={ComboInputClassName()}
+                    emptyHint={province ? "暂无匹配城市" : "请先选择省份"}
+                    onValueChange={(v) => {
+                      setCity(v);
                       setCounty("");
-                    }
-                  }}
-                />
-                <RegionCombobox
-                  value={county}
-                  disabled={!regionMod || !province || !city}
-                  options={countyOptions}
-                  placeholder="区县"
-                  inputClassName={ComboInputClassName()}
-                  emptyHint={province && city ? "暂无匹配区县" : "请先选择省市"}
-                  onValueChange={setCounty}
-                  onInputBlur={(v) => {
-                    if (!regionMod) return;
-                    const r = regionMod.resolveDistrict(province, city, v);
-                    if (r !== v) setCounty(r);
-                  }}
-                />
-              </div>
-            </FormField>
-          </div>
+                    }}
+                    onInputBlur={(v) => {
+                      if (!regionMod) return;
+                      const r = regionMod.resolveCity(province, v);
+                      if (r !== v) {
+                        setCity(r);
+                        setCounty("");
+                      }
+                    }}
+                  />
+                  <RegionCombobox
+                    value={county}
+                    disabled={!regionMod || !province || !city}
+                    options={countyOptions}
+                    placeholder="区县"
+                    inputClassName={ComboInputClassName()}
+                    emptyHint={province && city ? "暂无匹配区县" : "请先选择省市"}
+                    onValueChange={setCounty}
+                    onInputBlur={(v) => {
+                      if (!regionMod) return;
+                      const r = regionMod.resolveDistrict(province, city, v);
+                      if (r !== v) setCounty(r);
+                    }}
+                  />
+                </div>
+              </FormField>
+            </div>
+          )}
 
           <div className="mt-4 flex flex-wrap gap-2">
             <Button
@@ -927,29 +1161,29 @@ export function BaziPage() {
               variant={aiModeButtonVariant("full")}
               onClick={() => void genAi("full")}
               disabled={!canGenAi}
-              title="多维度命盘分析；再次点击可重新生成"
+              title="多维度命盘分析；再次点击将优先使用缓存"
             >
               全项
             </Button>
-            <Button variant={aiModeButtonVariant("career")} onClick={() => void genAi("career")} disabled={!canGenAi} title="仅事业维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("career")} onClick={() => void genAi("career")} disabled={!canGenAi} title="仅事业维度；再次点击将优先使用缓存">
               事业
             </Button>
-            <Button variant={aiModeButtonVariant("wealth")} onClick={() => void genAi("wealth")} disabled={!canGenAi} title="仅财运维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("wealth")} onClick={() => void genAi("wealth")} disabled={!canGenAi} title="仅财运维度；再次点击将优先使用缓存">
               财运
             </Button>
-            <Button variant={aiModeButtonVariant("love")} onClick={() => void genAi("love")} disabled={!canGenAi} title="仅婚恋维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("love")} onClick={() => void genAi("love")} disabled={!canGenAi} title="仅婚恋维度；再次点击将优先使用缓存">
               婚恋
             </Button>
-            <Button variant={aiModeButtonVariant("children")} onClick={() => void genAi("children")} disabled={!canGenAi} title="仅子女维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("children")} onClick={() => void genAi("children")} disabled={!canGenAi} title="仅子女维度；再次点击将优先使用缓存">
               子女
             </Button>
-            <Button variant={aiModeButtonVariant("kinship")} onClick={() => void genAi("kinship")} disabled={!canGenAi} title="仅六亲维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("kinship")} onClick={() => void genAi("kinship")} disabled={!canGenAi} title="仅六亲维度；再次点击将优先使用缓存">
               六亲
             </Button>
-            <Button variant={aiModeButtonVariant("health")} onClick={() => void genAi("health")} disabled={!canGenAi} title="仅健康维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("health")} onClick={() => void genAi("health")} disabled={!canGenAi} title="仅健康维度；再次点击将优先使用缓存">
               健康
             </Button>
-            <Button variant={aiModeButtonVariant("study")} onClick={() => void genAi("study")} disabled={!canGenAi} title="仅学业维度；再次点击可重新生成">
+            <Button variant={aiModeButtonVariant("study")} onClick={() => void genAi("study")} disabled={!canGenAi} title="仅学业维度；再次点击将优先使用缓存">
               学业
             </Button>
             <Button variant="secondary" onClick={() => void share()} disabled={!canShare}>
@@ -997,7 +1231,21 @@ export function BaziPage() {
             </div>
           ) : !showAiReading ? (
             <div className="min-w-0 space-y-3">
-              <h2 className="text-base font-extrabold text-[var(--text-strong)]">排盘结果</h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-extrabold text-[var(--text-strong)]">排盘结果</h2>
+                <div className="ml-auto flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy || !authLoggedIn || !activeProfileId}
+                    onClick={() => void run({ refresh: true })}
+                    title="强制重新排盘（不会命中缓存）"
+                  >
+                    强制重算
+                  </Button>
+                </div>
+              </div>
 
               <details className="home-landing-surface-inset p-4" open>
                 <summary className="cursor-pointer text-sm font-extrabold text-[var(--text-strong)]">四柱与简评</summary>
@@ -1028,7 +1276,7 @@ export function BaziPage() {
                   {chart.day_master ? (
                     <>
                       <li>
-                        日主强弱：{chart.day_master.strength_level}（{chart.day_master.strength_score}）
+                        日主强弱：{strengthLevelLabel || "—"}（{chart.day_master.strength_score}）
                       </li>
                       <li>喜用：{(chart.day_master.useful_elements ?? []).join("、") || "—"}</li>
                       <li>忌神：{(chart.day_master.avoid_elements ?? []).join("、") || "—"}</li>
@@ -1180,20 +1428,26 @@ export function BaziPage() {
                                   : "全项"}
                   </Badge>
                 ) : null}
-                <Button type="button" variant="secondary" size="sm" onClick={() => setShowAiReading(false)}>
-                  返回命盘
-                </Button>
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="hidden rounded-full border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 py-1 text-xs text-[var(--text-muted)] sm:inline">
+                    本内容由 AI 生成，仅供参考
+                  </span>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={aiGenerating || !chart?.chart_id}
+                    onClick={() => void genAi(aiAnalystMode ?? "full", chart, { refresh: true })}
+                    title="强制重新生成（不会命中缓存）"
+                  >
+                    重新生成
+                  </Button>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setShowAiReading(false)}>
+                    返回命盘
+                  </Button>
+                </div>
               </div>
-              <p className="mt-1 text-xs text-[var(--text-muted)]">
-                {aiGenerating ? (
-                  <>正在请求大模型…</>
-                ) : (
-                  <>
-                    灵犀解读正文如下。点「返回命盘」可查看四柱、大运与流年等数据。点「全项」「事业」等会<strong className="text-[var(--text-main)]">覆盖</strong>
-                    当前正文。仅供文化娱乐参考。
-                  </>
-                )}
-              </p>
+              {aiGenerating ? <p className="mt-1 text-xs text-[var(--text-muted)]">正在请求大模型…</p> : null}
 
               <div className="home-landing-surface-inset mt-3 min-h-[min(52vh,28rem)] border border-[rgba(74,120,108,0.22)] bg-[rgba(74,120,108,0.04)] p-3 sm:p-4">
                 {aiGenerating ? (
@@ -1205,7 +1459,7 @@ export function BaziPage() {
                     <p className="text-base font-semibold text-[var(--text-strong)]">正在生成…</p>
                     <p className="max-w-[20rem] text-sm text-[var(--text-muted)]">
                       预计约 <span className="font-semibold text-[var(--text-main)]">1–3 分钟</span>
-                      （「全项」更长；若超过 5 分钟会提示超时，多为网关反代超时，需把 Caddy/Nginx read_timeout 调到 ≥300s）
+                      （「全项」更长；超过 5 分钟请稍后重试）
                     </p>
                   </div>
                 ) : (
@@ -1221,7 +1475,8 @@ export function BaziPage() {
             </div>
           )}
         </div>
-      </section>
+        </section>
+      )}
 
       <div className="mt-10 text-center text-xs text-[var(--text-muted)]">
         <a className="underline decoration-[rgba(74,120,108,0.4)] underline-offset-4" href="/terms" rel="noreferrer noopener">
@@ -1251,6 +1506,127 @@ export function BaziPage() {
             <div className="mt-4 flex justify-end">
               <Button variant="secondary" size="sm" onClick={() => setHelpOpen(false)}>
                 我知道了
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {createArchiveOpen ? (
+        <div
+          className="bazi-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-4"
+          onClick={(e) => {
+            if (creatingArchive) return;
+            if (e.currentTarget === e.target) {
+              setCreateArchiveOpen(false);
+              setCreateArchiveErr("");
+            }
+          }}
+        >
+          <div className="bazi-modal-panel w-full max-w-[520px] rounded-[18px] border bg-[var(--surface-panel)] p-4">
+            <h3 className="text-[1.12rem] font-bold text-[var(--text-strong)]">新建档案</h3>
+
+            <div className="mt-4">
+              <label className="text-xs font-semibold text-[var(--text-muted)]">档案名称</label>
+              <input
+                ref={(el) => {
+                  createArchiveInputRef.current = el;
+                }}
+                className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                value={createArchiveName}
+                placeholder="例如：妈妈"
+                onChange={(e) => {
+                  setCreateArchiveName(e.target.value);
+                  if (createArchiveErr) setCreateArchiveErr("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    (e.currentTarget as HTMLInputElement).blur();
+                    void (async () => {
+                      if (creatingArchive) return;
+                      const name = createArchiveName.trim();
+                      if (!name) {
+                        setCreateArchiveErr("请输入档案名称");
+                        return;
+                      }
+                      if (name.length > 64) {
+                        setCreateArchiveErr("名称过长（最多 64 字）");
+                        return;
+                      }
+                      setCreatingArchive(true);
+                      try {
+                        const out = await createProfile(name, {});
+                        const next = [out.profile, ...profiles];
+                        setProfiles(next);
+                        setActiveProfileId(out.profile.id);
+                        setCreateArchiveOpen(false);
+                        setCreateArchiveErr("");
+                        nav(`/my/profiles?edit=${encodeURIComponent(String(out.profile.id))}`);
+                      } catch (err: any) {
+                        setCreateArchiveErr(explainError(String(err?.message || err)));
+                      } finally {
+                        setCreatingArchive(false);
+                      }
+                    })();
+                  }
+                  if (e.key === "Escape") {
+                    if (creatingArchive) return;
+                    setCreateArchiveOpen(false);
+                    setCreateArchiveErr("");
+                  }
+                }}
+              />
+              {createArchiveErr ? (
+                <div className="mt-2 text-sm text-[var(--bazi-danger)]">{createArchiveErr}</div>
+              ) : null}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={creatingArchive}
+                onClick={() => {
+                  setCreateArchiveOpen(false);
+                  setCreateArchiveErr("");
+                }}
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                disabled={creatingArchive}
+                onClick={() => {
+                  void (async () => {
+                    if (creatingArchive) return;
+                    const name = createArchiveName.trim();
+                    if (!name) {
+                      setCreateArchiveErr("请输入档案名称");
+                      return;
+                    }
+                    if (name.length > 64) {
+                      setCreateArchiveErr("名称过长（最多 64 字）");
+                      return;
+                    }
+                    setCreatingArchive(true);
+                    try {
+                      const out = await createProfile(name, {});
+                      const next = [out.profile, ...profiles];
+                      setProfiles(next);
+                      setActiveProfileId(out.profile.id);
+                      setCreateArchiveOpen(false);
+                      setCreateArchiveErr("");
+                      nav(`/my/profiles?edit=${encodeURIComponent(String(out.profile.id))}`);
+                    } catch (err: any) {
+                      setCreateArchiveErr(explainError(String(err?.message || err)));
+                    } finally {
+                      setCreatingArchive(false);
+                    }
+                  })();
+                }}
+              >
+                {creatingArchive ? "创建中…" : "创建"}
               </Button>
             </div>
           </div>

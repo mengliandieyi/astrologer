@@ -146,7 +146,8 @@ export function calculateBaziFromSolar(
   location = "beijing",
   calendarType: "solar" | "lunar" = "solar",
   gender: 0 | 1 = 1,
-  timeZone = "Asia/Shanghai"
+  timeZone = "Asia/Shanghai",
+  lunarLeapMonth = false
 ): CalculatedChart {
   const [yearStr, monthStr, dayStr] = birthDate.split("-");
   const [hourStr, minuteStr] = birthTime.split(":");
@@ -160,29 +161,50 @@ export function calculateBaziFromSolar(
     throw new Error("invalid_datetime");
   }
 
+  const Solar = (lunar as any).Solar;
+  const Lunar = (lunar as any).Lunar;
+
+  // Normalize: for lunar input, convert to solar first, then do timezone & true-solar-time correction.
+  let baseY = year;
+  let baseM = month;
+  let baseD = day;
+  let baseH = hour;
+  let baseMi = minute;
+  let inputLunarObj: any | null = null;
+  let inputSolarObj: any | null = null;
+  if (calendarType === "lunar") {
+    try {
+      inputLunarObj = Lunar.fromYmd(year, month, day, Boolean(lunarLeapMonth));
+      inputSolarObj = inputLunarObj.getSolar();
+      baseY = inputSolarObj.getYear();
+      baseM = inputSolarObj.getMonth();
+      baseD = inputSolarObj.getDay();
+      baseH = hour;
+      baseMi = minute;
+    } catch {
+      throw new Error("invalid_lunar_datetime");
+    }
+  } else {
+    inputSolarObj = Solar.fromYmdHms(year, month, day, hour, minute, 0);
+  }
+
   let utcMs0: number;
   try {
-    utcMs0 = zonedWallTimeToUtc(year, month, day, hour, minute, timeZone).getTime();
+    utcMs0 = zonedWallTimeToUtc(baseY, baseM, baseD, baseH, baseMi, timeZone).getTime();
   } catch {
     throw new Error("invalid_datetime");
   }
 
   // 真太阳时：均时差 +（出生地经度 − 所选时区标准经度）×4 分钟/度
   const lon = resolveLongitude(location);
-  const correctionMinutes = trueSolarCorrectionMinutes(year, month, day, lon, timeZone, utcMs0);
+  const correctionMinutes = trueSolarCorrectionMinutes(baseY, baseM, baseD, lon, timeZone, utcMs0);
   const corrected = new Date(utcMs0 + correctionMinutes * 60 * 1000);
 
   const bj = utcInstantToBeijingYmdHms(corrected);
 
-  const Solar = (lunar as any).Solar;
-  const Lunar = (lunar as any).Lunar;
-  let solarObj;
-  if (calendarType === "lunar") {
-    const lunarObjInput = Lunar.fromYmdHms(bj.y, bj.m, bj.d, bj.h, bj.mi, bj.s);
-    solarObj = lunarObjInput.getSolar();
-  } else {
-    solarObj = Solar.fromYmdHms(bj.y, bj.m, bj.d, bj.h, bj.mi, bj.s);
-  }
+  // After correction, recompute chart by corrected solar datetime (Beijing snapshot).
+  // For lunar input, keep calendar_meta.lunar_datetime from original lunar input.
+  const solarObj = Solar.fromYmdHms(bj.y, bj.m, bj.d, bj.h, bj.mi, bj.s);
   const lunarObj = solarObj.getLunar();
   const eight = lunarObj.getEightChar();
   eight.setSect(2);
@@ -319,7 +341,7 @@ export function calculateBaziFromSolar(
     calendar_meta: {
       input_calendar: calendarType,
       solar_datetime: solarObj.toYmdHms(),
-      lunar_datetime: lunarObj.toString(),
+      lunar_datetime: inputLunarObj ? inputLunarObj.toString() : lunarObj.toString(),
     },
     fortune_cycles: {
       yun_start: yun.getStartSolar().toYmd(),

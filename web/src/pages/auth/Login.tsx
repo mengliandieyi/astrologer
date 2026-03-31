@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { authLogin } from "../../lib/authClient";
 
 function explainAuthError(raw: string): string {
@@ -30,7 +30,7 @@ function useNextParam() {
   const loc = useLocation();
   return useMemo(() => {
     const sp = new URLSearchParams(loc.search);
-    return sp.get("next") || "/workspace";
+    return sp.get("next") || "/";
   }, [loc.search]);
 }
 
@@ -61,15 +61,15 @@ export function Login() {
         <Card className="glass">
           <CardHeader>
             <CardTitle>登录</CardTitle>
-            <CardDescription>登录后可保存历史盘面，并解锁排盘计算。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="space-y-1">
-              <label className={labelCls}>用户名</label>
+              <label className={labelCls}>邮箱或用户名</label>
               <input
                 className={inputCls}
                 value={username}
                 autoComplete="username"
+                placeholder="name@example.com 或 username"
                 onChange={(e) => setUsername(e.target.value)}
               />
             </div>
@@ -90,6 +90,9 @@ export function Login() {
             <div className="flex items-center justify-between gap-3 pt-2">
               <Button variant="secondary" asChild>
                 <Link to={`/register?next=${encodeURIComponent(next)}`}>去注册</Link>
+              </Button>
+              <Button variant="ghost" asChild>
+                <Link to={`/forgot-password?next=${encodeURIComponent(next)}`}>忘记密码</Link>
               </Button>
               <Button disabled={busy} onClick={() => void submit()}>
                 {busy ? "登录中…" : "登录"}

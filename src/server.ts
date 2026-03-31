@@ -13,9 +13,13 @@ import { generateAiReading } from "./lib/aiClient.js";
 import { enrichChartFortuneCycles } from "./lib/enrichChartFortunes.js";
 import {
   createUser,
+  createUserWithEmail,
   getUserById,
+  getUserByEmail,
   getUserByUsername,
   signAuthToken,
+  setUserPasswordById,
+  validateEmail,
   validatePassword,
   validateUsername,
   verifyAuthToken,
@@ -23,18 +27,29 @@ import {
 } from "./lib/auth.js";
 import {
   createProfile,
+  consumePasswordResetToken,
+  createPasswordResetToken,
   deleteProfile,
   ensureDefaultProfile,
   getAiReadingCache,
+  getProfileById,
+  getLatestChartByProfile,
   getChart,
   getMetrics,
   getStorageMode,
+  getHepanReportById,
+  getHepanReportCache,
+  deleteHepanReportById,
   listChartsByProfile,
   listChartsByUser,
+  listHepanReportsByUser,
   listProfilesByUser,
   saveAiReadingCache,
   saveChart,
+  upsertHepanReport,
+  updateProfile,
 } from "./lib/store.js";
+import { sendPasswordResetEmail, sendTestEmail } from "./lib/mailer.js";
 
 type ChartRecord = {
   chart_id: string;
@@ -190,9 +205,25 @@ app.get("/comic", (_req, res) => {
   res.sendFile(path.join(publicDir, "comic.html"));
 });
 
+// SPA route fallbacks (production): serve index.html for client-side routes.
+if (spaBuilt) {
+  app.get(
+    [
+      "/login",
+      "/register",
+      "/forgot-password",
+      "/reset-password",
+      "/my/charts",
+      "/my/profiles",
+      "/hepan",
+      "/my/hepan",
+    ],
+    (_req, res) => sendSpaIndex(res)
+  );
+}
+
 app.get("/workspace", (_req, res) => {
-  if (spaBuilt) return sendSpaIndex(res);
-  res.status(404).type("txt").send("Workspace UI requires building the web app: cd web && npm run build");
+  res.redirect(302, "/");
 });
 
 app.use(express.static(publicDir));
@@ -288,8 +319,9 @@ app.get("/api/auth/me", async (req, res) => {
 app.post("/api/auth/register", async (req, res) => {
   try {
     const username = validateUsername(String(req.body?.username ?? ""));
+    const email = validateEmail(String(req.body?.email ?? ""));
     const password = validatePassword(String(req.body?.password ?? ""));
-    const u = await createUser(username, password);
+    const u = await createUserWithEmail(username, email, password);
     const token = signAuthToken(u.id);
     setAuthCookie(res, token, cookieSecure(req));
     return res.json({ user: { id: u.id, username: u.username } });
@@ -298,10 +330,76 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
+function hashHex(input: string): string {
+  return crypto.createHash("sha256").update(input).digest("hex");
+}
+
+function publicOrigin(req: express.Request): string {
+  // respect reverse proxy headers
+  const xf = String(req.header("x-forwarded-proto") || "").toLowerCase();
+  const proto = xf || (req.secure ? "https" : "http");
+  const host = String(req.get("host") || "").trim();
+  return `${proto}://${host}`;
+}
+
+app.post("/api/auth/forgot-password", async (req, res) => {
+  // Always return ok to avoid account enumeration
+  try {
+    const email = validateEmail(String(req.body?.email ?? ""));
+    const user = await getUserByEmail(email);
+    if (!user) return res.json({ ok: true });
+
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const tokenHash = hashHex(rawToken);
+    const expiresAt = new Date(Date.now() + 30 * 60_000);
+    await createPasswordResetToken({ user_id: user.id, token_hash: tokenHash, expires_at: expiresAt });
+
+    const origin = publicOrigin(req);
+    const resetUrl = `${origin}/reset-password?token=${encodeURIComponent(rawToken)}`;
+    await sendPasswordResetEmail(email, resetUrl);
+    return res.json({ ok: true });
+  } catch {
+    return res.json({ ok: true });
+  }
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const tokenRaw = String(req.body?.token ?? "").trim();
+    if (!tokenRaw) return res.status(400).json({ error: "token_required" });
+    const password = validatePassword(String(req.body?.password ?? ""));
+    const tokenHash = hashHex(tokenRaw);
+    const consumed = await consumePasswordResetToken(tokenHash);
+    if (!consumed) return res.status(400).json({ error: "token_invalid_or_expired" });
+    await setUserPasswordById(consumed.user_id, password);
+    return res.json({ ok: true });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const username = validateUsername(String(req.body?.username ?? ""));
+    const identRaw = String(req.body?.username ?? "").trim();
+    if (!identRaw) return res.status(400).json({ error: "username_required" });
     const password = validatePassword(String(req.body?.password ?? ""));
+
+    // Login by either email or username.
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identRaw);
+    if (isEmail) {
+      const email = String(identRaw).toLowerCase();
+      const u0 = await getUserByEmail(email);
+      if (!u0) return res.status(401).json({ error: "invalid_credentials" });
+      const u = await getUserByUsername(u0.username);
+      if (!u) return res.status(401).json({ error: "invalid_credentials" });
+      const ok = await verifyPassword(password, u.password_hash);
+      if (!ok) return res.status(401).json({ error: "invalid_credentials" });
+      const token = signAuthToken(u.id);
+      setAuthCookie(res, token, cookieSecure(req));
+      return res.json({ user: { id: u.id, username: u.username } });
+    }
+
+    const username = validateUsername(identRaw);
     const u = await getUserByUsername(username);
     if (!u) return res.status(401).json({ error: "invalid_credentials" });
     const ok = await verifyPassword(password, u.password_hash);
@@ -344,7 +442,40 @@ app.post("/api/me/profiles", requireAuth, async (req, res) => {
   const uid = (req as any).userId as number;
   try {
     const name = String(req.body?.name ?? "");
-    const p = await createProfile(uid, name);
+    const metaRaw = req.body?.meta;
+    const meta =
+      metaRaw && typeof metaRaw === "object" && !Array.isArray(metaRaw) ? (metaRaw as Record<string, unknown>) : {};
+    const p = await createProfile(uid, name, meta);
+    return res.json({ profile: p });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get("/api/me/profiles/:profileId", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const pid = Number(req.params.profileId ?? "");
+  if (!Number.isFinite(pid) || pid <= 0) return res.status(400).json({ error: "profile_id_required" });
+  try {
+    const p = await getProfileById(uid, Math.floor(pid));
+    if (!p) return res.status(404).json({ error: "profile_not_found" });
+    return res.json({ profile: p });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.patch("/api/me/profiles/:profileId", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const pid = Number(req.params.profileId ?? "");
+  if (!Number.isFinite(pid) || pid <= 0) return res.status(400).json({ error: "profile_id_required" });
+  try {
+    const nameRaw = req.body?.name;
+    const metaRaw = req.body?.meta;
+    const patch: { name?: string; meta?: Record<string, unknown> } = {};
+    if (typeof nameRaw === "string") patch.name = nameRaw;
+    if (metaRaw && typeof metaRaw === "object" && !Array.isArray(metaRaw)) patch.meta = metaRaw as Record<string, unknown>;
+    const p = await updateProfile(uid, Math.floor(pid), patch);
     return res.json({ profile: p });
   } catch (e: any) {
     return res.status(400).json({ error: String(e?.message || e) });
@@ -376,35 +507,108 @@ app.get("/api/me/profiles/:profileId/charts", requireAuth, async (req, res) => {
   }
 });
 
+function pickString(meta: Record<string, unknown>, key: string): string {
+  const v = meta[key];
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function pickLocation(meta: Record<string, unknown>): string {
+  const direct = pickString(meta, "birth_location");
+  if (direct) return direct;
+  const r = meta["birth_region"];
+  if (!r || typeof r !== "object") return "";
+  const province = typeof (r as any).province === "string" ? String((r as any).province).trim() : "";
+  const city = typeof (r as any).city === "string" ? String((r as any).city).trim() : "";
+  const district = typeof (r as any).district === "string" ? String((r as any).district).trim() : "";
+  return `${province}${city}${district}`.trim();
+}
+
+function pickGender(meta: Record<string, unknown>): 0 | 1 {
+  const v = meta["gender"];
+  if (v === 0 || v === 1) return v;
+  const n = Number(v);
+  return n === 0 ? 0 : 1;
+}
+
 app.post("/api/bazi/calculate", requireAuth, async (req, res) => {
-  const { birth_date, birth_time, timezone, location, calendar_type, gender, profile_id } = req.body ?? {};
-  if (!birth_date || !birth_time || !timezone || !location) {
-    return res.status(400).json({ error: "missing_required_fields" });
-  }
-  if (!isValidDateString(String(birth_date)) || !isValidTimeString(String(birth_time))) {
-    return res.status(400).json({ error: "invalid_birth_datetime_format" });
-  }
-  if (!isValidTimezone(String(timezone))) {
-    return res.status(400).json({ error: "invalid_timezone" });
-  }
-  if (!isValidLocationInput(String(location))) {
-    return res.status(400).json({ error: "invalid_location" });
-  }
+  const body = req.body ?? {};
+  const profileSourceEnabled = String(process.env.PROFILE_AS_SOURCE ?? "true").toLowerCase() !== "false";
+  let calendar_type = body.calendar_type === "lunar" ? "lunar" : "solar";
+  let lunar_leap_month = Boolean((body as any)?.birth_lunar_leap);
+  const refresh = Boolean((body as any)?.refresh);
 
   try {
     const userId = (req as any).userId as number;
-    const pidRaw = Number(profile_id ?? "");
+    const pidRaw = Number(body.profile_id ?? "");
     const profileId =
       Number.isFinite(pidRaw) && pidRaw > 0 ? Math.floor(pidRaw) : await ensureDefaultProfile(userId);
+    let birth_date = "";
+    let birth_time = "";
+    let timezone = "";
+    let location = "";
+    let gender: 0 | 1 = 1;
+    let profileUpdatedAt = "";
+
+    if (profileSourceEnabled) {
+      const p = await getProfileById(userId, profileId);
+      if (!p) return res.status(404).json({ error: "profile_not_found" });
+      profileUpdatedAt = String(p.updated_at || "");
+      const meta = (p.meta ?? {}) as Record<string, unknown>;
+      birth_date = pickString(meta, "birth_date");
+      birth_time = pickString(meta, "birth_time");
+      timezone = pickString(meta, "birth_timezone") || "Asia/Shanghai";
+      location = pickLocation(meta);
+      gender = pickGender(meta);
+      const calRaw = pickString(meta, "birth_calendar_type").toLowerCase();
+      calendar_type = calRaw === "lunar" ? "lunar" : "solar";
+      lunar_leap_month = Boolean((meta as any)?.birth_lunar_leap);
+
+      if (!refresh) {
+        const latest = await getLatestChartByProfile(userId, profileId);
+        if (latest?.created_at && profileUpdatedAt) {
+          const c = String(latest.created_at);
+          const p = String(profileUpdatedAt);
+          const canStringCompare =
+            /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(c) && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(p);
+          const ok = canStringCompare ? c >= p : new Date(c).getTime() >= new Date(p).getTime();
+          if (ok) {
+            return res.json({ ...(latest as any), from_cache: true });
+          }
+        }
+      }
+    } else {
+      // legacy mode: accept direct payload (allows quick rollback)
+      birth_date = String(body.birth_date ?? "");
+      birth_time = String(body.birth_time ?? "");
+      timezone = String(body.timezone ?? "");
+      location = String(body.location ?? "");
+      gender = Number(body.gender) === 0 ? 0 : 1;
+      lunar_leap_month = Boolean((body as any)?.birth_lunar_leap);
+    }
+
+    if (!birth_date || !birth_time || !timezone || !location) {
+      return res.status(400).json({ error: profileSourceEnabled ? "profile_incomplete" : "missing_required_fields" });
+    }
+    if (!isValidDateString(String(birth_date)) || !isValidTimeString(String(birth_time))) {
+      return res.status(400).json({ error: "invalid_birth_datetime_format" });
+    }
+    if (!isValidTimezone(String(timezone))) {
+      return res.status(400).json({ error: "invalid_timezone" });
+    }
+    if (!isValidLocationInput(String(location))) {
+      return res.status(400).json({ error: "invalid_location" });
+    }
+
     const chartId = crypto.randomUUID();
-    const g = Number(gender) === 0 ? 0 : 1;
+    const g = gender;
     const calc = calculateBaziFromSolar(
       String(birth_date),
       String(birth_time),
       String(location),
       calendar_type === "lunar" ? "lunar" : "solar",
       g,
-      String(timezone)
+      String(timezone),
+      lunar_leap_month
     );
     const output: ChartRecord = {
       chart_id: chartId,
@@ -435,9 +639,171 @@ app.post("/api/bazi/calculate", requireAuth, async (req, res) => {
       user_id: userId,
       profile_id: profileId,
     });
-    return res.json(output);
-  } catch {
-    return res.status(422).json({ error: "invalid_birth_datetime" });
+    return res.json({ ...output, from_cache: false });
+  } catch (e: any) {
+    // Provide detail for debugging; frontend will humanize.
+    const detail = String(e?.message || "");
+    return res.status(422).json({ error: "invalid_birth_datetime", detail: detail.slice(0, 200) });
+  }
+});
+
+app.get("/api/me/hepan", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const limit = Number(req.query.limit ?? 30);
+  try {
+    const items = await listHepanReportsByUser(uid, Number.isFinite(limit) ? limit : 30);
+    return res.json({ reports: items });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get("/api/hepan/:reportId", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const rid = Number(req.params.reportId ?? "");
+  if (!Number.isFinite(rid) || rid <= 0) return res.status(400).json({ error: "report_id_required" });
+  try {
+    const out = await getHepanReportById(uid, Math.floor(rid));
+    if (!out) return res.status(404).json({ error: "hepan_not_found" });
+    return res.json({ report: out });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.delete("/api/hepan/:reportId", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const rid = Number(req.params.reportId ?? "");
+  if (!Number.isFinite(rid) || rid <= 0) return res.status(400).json({ error: "report_id_required" });
+  try {
+    const ok = await deleteHepanReportById(uid, Math.floor(rid));
+    if (!ok) return res.status(404).json({ error: "hepan_not_found" });
+    return res.json({ ok: true });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/hepan/compute", requireAuth, async (req, res) => {
+  const body = req.body ?? {};
+  const uid = (req as any).userId as number;
+  const aRaw = Number(body.profile_id_a ?? "");
+  const bRaw = Number(body.profile_id_b ?? "");
+  const refresh = Boolean((body as any)?.refresh);
+  const relationRaw = String((body as any)?.relation ?? "").trim();
+  const relation = relationRaw ? relationRaw.slice(0, 16) : "";
+  if (!Number.isFinite(aRaw) || aRaw <= 0 || !Number.isFinite(bRaw) || bRaw <= 0) {
+    return res.status(400).json({ error: "profile_id_pair_required" });
+  }
+  const a0 = Math.floor(aRaw);
+  const b0 = Math.floor(bRaw);
+  const profileIdA = Math.min(a0, b0);
+  const profileIdB = Math.max(a0, b0);
+
+  try {
+    if (!refresh) {
+      const cached = await getHepanReportCache(uid, profileIdA, profileIdB);
+      if (cached?.ai_text) {
+        return res.json({ report: cached, from_cache: true });
+      }
+    }
+
+    const pA = await getProfileById(uid, profileIdA);
+    const pB = await getProfileById(uid, profileIdB);
+    if (!pA || !pB) return res.status(404).json({ error: "profile_not_found" });
+    const metaA = (pA.meta ?? {}) as Record<string, unknown>;
+    const metaB = (pB.meta ?? {}) as Record<string, unknown>;
+
+    const birthA = {
+      date: pickString(metaA, "birth_date"),
+      time: pickString(metaA, "birth_time"),
+      tz: pickString(metaA, "birth_timezone") || "Asia/Shanghai",
+      loc: pickLocation(metaA),
+      gender: pickGender(metaA),
+      cal: pickString(metaA, "birth_calendar_type").toLowerCase() === "lunar" ? "lunar" : "solar",
+      leap: Boolean((metaA as any)?.birth_lunar_leap),
+    };
+    const birthB = {
+      date: pickString(metaB, "birth_date"),
+      time: pickString(metaB, "birth_time"),
+      tz: pickString(metaB, "birth_timezone") || "Asia/Shanghai",
+      loc: pickLocation(metaB),
+      gender: pickGender(metaB),
+      cal: pickString(metaB, "birth_calendar_type").toLowerCase() === "lunar" ? "lunar" : "solar",
+      leap: Boolean((metaB as any)?.birth_lunar_leap),
+    };
+    if (!birthA.date || !birthA.time || !birthA.loc || !birthB.date || !birthB.time || !birthB.loc) {
+      return res.status(400).json({ error: "profile_incomplete" });
+    }
+
+    const chartA = calculateBaziFromSolar(
+      birthA.date,
+      birthA.time,
+      birthA.loc,
+      birthA.cal === "lunar" ? "lunar" : "solar",
+      birthA.gender,
+      birthA.tz,
+      birthA.leap
+    );
+    const chartB = calculateBaziFromSolar(
+      birthB.date,
+      birthB.time,
+      birthB.loc,
+      birthB.cal === "lunar" ? "lunar" : "solar",
+      birthB.gender,
+      birthB.tz,
+      birthB.leap
+    );
+
+    const prompt = `
+你是严谨、结构化、可执行的合盘分析师，请用简体中文输出。
+要求：避免玄学口吻与夸张断言；用“适配/风险/建议”的方式表达；不要输出用户隐私数据（手机号/邮箱）。
+
+两人关系：${relation || "未指定"}
+
+对象A：${pA.name}（性别：${birthA.gender === 0 ? "女" : "男"}，历法：${birthA.cal === "lunar" ? "农历" : "公历"}）
+四柱：年${chartA.pillars.year} 月${chartA.pillars.month} 日${chartA.pillars.day} 时${chartA.pillars.hour}
+日主强弱：${chartA.day_master?.strength_level ?? ""} ${chartA.day_master?.strength_score ?? ""}
+喜用：${(chartA.day_master?.useful_elements ?? []).join("、")}
+忌神：${(chartA.day_master?.avoid_elements ?? []).join("、")}
+
+对象B：${pB.name}（性别：${birthB.gender === 0 ? "女" : "男"}，历法：${birthB.cal === "lunar" ? "农历" : "公历"}）
+四柱：年${chartB.pillars.year} 月${chartB.pillars.month} 日${chartB.pillars.day} 时${chartB.pillars.hour}
+日主强弱：${chartB.day_master?.strength_level ?? ""} ${chartB.day_master?.strength_score ?? ""}
+喜用：${(chartB.day_master?.useful_elements ?? []).join("、")}
+忌神：${(chartB.day_master?.avoid_elements ?? []).join("、")}
+
+输出结构：
+1) 一句话总评（<=25字）
+2) 适配亮点（3条）
+3) 主要冲突点（3条，给出触发场景）
+4) 相处建议（5条，可执行）
+5) 风险与兜底（3条）
+`.trim();
+
+    const aiText = await generateGenericAiText(prompt);
+    const provider = process.env.ALI_API_KEY ? "qwen" : "fallback";
+    const payload = {
+      one_line: "",
+      relation: relation || "",
+      a: { id: profileIdA, name: pA.name },
+      b: { id: profileIdB, name: pB.name },
+      pillars: { a: chartA.pillars, b: chartB.pillars },
+    } satisfies Record<string, unknown>;
+
+    const saved = await upsertHepanReport({
+      user_id: uid,
+      profile_id_a: profileIdA,
+      profile_id_b: profileIdB,
+      profile_name_a: pA.name,
+      profile_name_b: pB.name,
+      payload,
+      ai_text: aiText,
+      provider,
+    });
+    return res.json({ report: saved, from_cache: false });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
   }
 });
 
@@ -814,6 +1180,55 @@ app.get("/r/:chartId", (req, res) => {
 
 app.get("/api/admin/metrics", requireAdmin, async (_req, res) => {
   res.json(await getMetrics());
+});
+
+app.post("/api/admin/smtp/test", requireAdmin, async (req, res) => {
+  try {
+    const to = String(req.body?.to ?? "").trim();
+    if (!to) return res.status(400).json({ error: "to_required" });
+    await sendTestEmail(to);
+    return res.json({ ok: true });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get("/api/admin/smtp/status", requireAdmin, (_req, res) => {
+  // Do not leak secrets; only show presence and basic parsed fields.
+  const cwd = process.cwd();
+  const envPath = path.join(cwd, ".env");
+  let envFileExists = false;
+  try {
+    envFileExists = fs.existsSync(envPath);
+  } catch {
+    envFileExists = false;
+  }
+  const host = String(process.env.SMTP_HOST ?? "").trim();
+  const portRaw = String(process.env.SMTP_PORT ?? "").trim();
+  const port = Number(portRaw);
+  const secure = String(process.env.SMTP_SECURE ?? "false").toLowerCase() === "true";
+  const user = String(process.env.SMTP_USER ?? "").trim();
+  const pass = String(process.env.SMTP_PASS ?? "").trim();
+  const from = String(process.env.SMTP_FROM ?? "").trim() || user;
+  return res.json({
+    ok: true,
+    runtime: { cwd, envFileExists },
+    present: {
+      SMTP_HOST: Boolean(host),
+      SMTP_PORT: Boolean(portRaw),
+      SMTP_SECURE: Boolean(String(process.env.SMTP_SECURE ?? "").trim()),
+      SMTP_USER: Boolean(user),
+      SMTP_PASS: Boolean(pass),
+      SMTP_FROM: Boolean(String(process.env.SMTP_FROM ?? "").trim() || user),
+    },
+    parsed: {
+      host: host || null,
+      port: Number.isFinite(port) ? port : null,
+      secure,
+      user: user ? user.replace(/^[^@]{2}/, "**") : null,
+      from: from ? from.replace(/^[^<]{2}/, "**") : null,
+    },
+  });
 });
 
 app.get("/terms", (_req, res) => res.sendFile(path.join(publicDir, "terms.html")));

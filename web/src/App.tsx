@@ -1,13 +1,32 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { useEffect } from "react";
 import { HomeSoftStageDecor } from "./components/HomeSoftStageDecor";
 import { HomePage } from "./pages/home/HomePage";
-import { Workspace } from "./pages/workspace/Workspace";
 import { Placeholder } from "./pages/workspace/Placeholder";
 import { BaziPage } from "./pages/bazi/BaziPage";
 import { Login } from "./pages/auth/Login";
 import { Register } from "./pages/auth/Register";
+import { ForgotPassword } from "./pages/auth/ForgotPassword";
+import { ResetPassword } from "./pages/auth/ResetPassword";
 import { MyCharts } from "./pages/workspace/MyCharts";
+import { MyProfiles } from "./pages/workspace/MyProfiles";
+import { HepanPage } from "./pages/hepan/HepanPage";
+import { MyHepan } from "./pages/hepan/MyHepan";
+
+function ThemeGate() {
+  const loc = useLocation();
+  useEffect(() => {
+    const p = loc.pathname || "";
+    const shouldUseBaziTheme = p === "/bazi" || p === "/my/profiles" || p === "/hepan" || p === "/my/hepan";
+    if (shouldUseBaziTheme) {
+      document.documentElement.classList.add("theme-bazi");
+    } else {
+      document.documentElement.classList.remove("theme-bazi");
+    }
+  }, [loc.pathname]);
+  return null;
+}
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -21,11 +40,16 @@ function AnimatedRoutes() {
       >
         <Routes location={location}>
           <Route path="/" element={<HomePage />} />
-          <Route path="/workspace" element={<Workspace />} />
+          <Route path="/workspace" element={<Navigate to="/" replace />} />
           <Route path="/my/charts" element={<MyCharts />} />
+          <Route path="/my/profiles" element={<MyProfiles />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/bazi" element={<BaziPage />} />
+          <Route path="/hepan" element={<HepanPage />} />
+          <Route path="/my/hepan" element={<MyHepan />} />
           <Route path="/stocks" element={<Placeholder title="资研参详" hint="将接入结构化摘要/风险清单与历史记录。" />} />
           <Route path="/travel" element={<Placeholder title="行旅筹划" hint="将接入行程生成、预算拆分与清单。" />} />
           <Route path="/comic" element={<Placeholder title="漫剧工坊" hint="将接入分镜脚本与角色卡模板。" />} />
@@ -41,6 +65,7 @@ export default function App() {
       <div className="home-soft-stage">
         <HomeSoftStageDecor />
         <div className="home-soft-stage-content min-h-screen">
+          <ThemeGate />
           <AnimatedRoutes />
         </div>
       </div>

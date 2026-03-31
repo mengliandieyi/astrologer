@@ -141,6 +141,16 @@
     background: rgba(255, 255, 255, 0.9);
   }
 
+  .home-navbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: nowrap;
+  }
+  .home-navbar-actions > * {
+    white-space: nowrap;
+  }
+
   /* web/public/home.html 整页背景层（云 / 纸人 / 花瓣 / 水墨纹） */
   .home-soft-stage {
     position: relative;

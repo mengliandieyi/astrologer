@@ -21,6 +21,9 @@ function Topbar() {
           <Link to="/my/charts">我的盘</Link>
         </Button>
         <Button asChild variant="ghost" size="sm">
+          <Link to="/my/profiles">我的档案</Link>
+        </Button>
+        <Button asChild variant="ghost" size="sm">
           <Link to="/bazi">八字</Link>
         </Button>
         <Button asChild variant="ghost" size="sm">

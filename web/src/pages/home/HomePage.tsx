@@ -1,6 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Button } from "../../components/ui/button";
+import { authLogout, authMe } from "../../lib/authClient";
 
 function splashAndNavigate(el: HTMLElement | null, path: string, navigate: (p: string) => void) {
   if (!el) {
@@ -19,6 +20,7 @@ function splashAndNavigate(el: HTMLElement | null, path: string, navigate: (p: s
 export function HomePage() {
   const navigate = useNavigate();
   const [helpOpen, setHelpOpen] = useState(false);
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
 
   useEffect(() => {
     const prev = document.title;
@@ -28,6 +30,29 @@ export function HomePage() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void authMe()
+      .then((m) => {
+        if (!cancelled) setLoggedIn(Boolean((m as any)?.logged_in));
+      })
+      .catch(() => {
+        if (!cancelled) setLoggedIn(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function onLogout() {
+    try {
+      await authLogout();
+    } finally {
+      setLoggedIn(false);
+      navigate(`/login?next=${encodeURIComponent("/")}`, { replace: true });
+    }
+  }
+
   return (
     <div className="home-landing">
       <nav className="home-navbar">
@@ -35,9 +60,20 @@ export function HomePage() {
           <div className="home-logo-circle" aria-hidden />
           <span className="home-logo-text">知行馆</span>
         </Link>
-        <button type="button" className="home-help-btn" onClick={() => setHelpOpen(true)}>
-          帮助中心
-        </button>
+        <div className="home-navbar-actions">
+          <button type="button" className="home-help-btn" onClick={() => setHelpOpen(true)}>
+            帮助中心
+          </button>
+          {loggedIn === false ? (
+            <Button asChild variant="secondary" size="sm">
+              <Link to={`/login?next=${encodeURIComponent("/")}`}>登录</Link>
+            </Button>
+          ) : loggedIn === true ? (
+            <Button variant="secondary" size="sm" onClick={() => void onLogout()}>
+              退出登录
+            </Button>
+          ) : null}
+        </div>
       </nav>
 
       <div className="home-landing-header">
@@ -49,7 +85,7 @@ export function HomePage() {
             定程筹旅；行文分镜。
           </p>
         </div>
-        <Link to="/workspace" className="home-landing-mascot" aria-label="进入工作台">
+      <Link to="/" className="home-landing-mascot" aria-label="返回首页">
           <div className="home-landing-mascot-icon" aria-hidden />
           <div className="home-landing-mascot-text">可可爱爱小馆灵</div>
         </Link>
