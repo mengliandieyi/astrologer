@@ -37,6 +37,7 @@
   body {
     background-color: var(--bg-page);
     color: var(--text-main);
+    overflow-x: hidden;
     background:
       radial-gradient(1100px 520px at 3% -8%, rgba(143, 205, 189, 0.22), transparent 65%),
       radial-gradient(900px 420px at 98% 0%, rgba(212, 176, 239, 0.2), transparent 60%),
@@ -362,6 +363,23 @@
     --bazi-danger: #a04545;
     color: var(--text-main);
   }
+
+  /* 资研参详页：沿用首页黄色主色（不影响图表独立配色） */
+  .page-stocks {
+    --brand-soft: linear-gradient(135deg, rgba(245, 224, 138, 0.9), rgba(201, 162, 39, 0.72));
+    --brand-text: #5a4a7a;
+    --focus-ring: rgba(201, 162, 39, 0.32);
+  }
+  /* 资研参详页：需要纵向滚动承载图表/副图，避免桌面端 100vh + overflow:hidden 裁切 */
+  @media (min-width: 769px) {
+    .page-stocks.home-landing {
+      height: auto;
+      min-height: 100vh;
+      min-height: 100dvh;
+      max-height: none;
+      overflow-y: auto;
+    }
+  }
   .page-bazi .bazi-status-pending {
     animation: bazi-status-pending-pulse 1.6s ease-in-out infinite;
   }
@@ -491,6 +509,62 @@
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
+  }
+
+  /* 资研参详页：沿用首页黄色（更明显的黄光晕与横幅标题渐变） */
+  html.theme-stocks {
+    --text-strong: #4a3a10;
+    --text-main: #5b4714;
+    --text-muted: #7a6323;
+    --text-soft: #745e22;
+    --border-soft: rgba(201, 162, 39, 0.32);
+    --border-main: rgba(201, 162, 39, 0.26);
+    --surface-soft: rgba(255, 255, 255, 0.74);
+    --focus-ring: rgba(201, 162, 39, 0.32);
+  }
+  html.theme-stocks body {
+    background:
+      radial-gradient(980px 520px at 6% -6%, rgba(235, 204, 92, 0.22), transparent 65%),
+      radial-gradient(860px 460px at 96% 6%, rgba(201, 162, 39, 0.16), transparent 58%),
+      linear-gradient(165deg, #fbf7ea, #f7f0d8 55%, #fbf8ef);
+    color: var(--text-main);
+  }
+  html.theme-stocks .home-soft-stage {
+    background: linear-gradient(135deg, #fbf7ea 0%, #f5efdb 45%, #fbf8ef 100%);
+  }
+  html.theme-stocks .home-soft-stage::before {
+    opacity: 0.34;
+  }
+  html.theme-stocks .home-logo-circle {
+    background: linear-gradient(135deg, #f5e08a, #c9a227);
+    box-shadow: 0 0 22px rgba(201, 162, 39, 0.22);
+  }
+  html.theme-stocks .home-landing-title {
+    background: linear-gradient(95deg, #7a5d14, #c9a227);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  html.theme-stocks .home-landing-subline {
+    color: var(--text-muted);
+  }
+  html.theme-stocks .home-landing-mascot-text {
+    color: var(--text-muted);
+  }
+  html.theme-stocks .home-logo-text {
+    color: #6f5417;
+  }
+  html.theme-stocks .home-help-btn {
+    color: #6b5317;
+    border-color: rgba(201, 162, 39, 0.34);
+  }
+  html.theme-stocks .home-landing-mascot-icon {
+    background: linear-gradient(135deg, rgba(245, 224, 138, 0.9), rgba(201, 162, 39, 0.85));
+  }
+
+  /* 资研参详：让 header 与 tabs 更贴近（对齐八字页观感） */
+  .page-stocks .home-landing-header {
+    margin-bottom: 0.9rem;
   }
 
   .home-landing-title {

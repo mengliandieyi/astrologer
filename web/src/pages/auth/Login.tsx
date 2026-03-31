@@ -6,6 +6,7 @@ import { authLogin } from "../../lib/authClient";
 
 function explainAuthError(raw: string): string {
   const s = (raw || "").trim();
+  if (/AbortError|aborted/i.test(s)) return "登录超时，请重试";
   try {
     const j = JSON.parse(s);
     const code = String(j?.error || "");
@@ -15,6 +16,7 @@ function explainAuthError(raw: string): string {
     if (code === "username_invalid_length") return "用户名长度需 3–64";
     if (code === "username_invalid_chars") return "用户名仅支持字母/数字/下划线/@/点";
     if (code === "password_invalid_length") return "密码长度需 8–72";
+    if (code === "auth_backend_unavailable") return "鉴权服务暂不可用（数据库连接失败），请稍后重试或检查数据库连通性";
     if (code) return code;
   } catch {
     // ignore

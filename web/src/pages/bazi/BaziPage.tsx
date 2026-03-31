@@ -1,5 +1,8 @@
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
 import { RegionCombobox } from "../../components/bazi/RegionCombobox";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -431,8 +434,38 @@ function ComboInputClassName() {
 export function BaziPage() {
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
-  const chartIdFromQuery = params.get("chart_id") || "";
-  const fromShare = Boolean(chartIdFromQuery);
+  const shareChartIdFromQuery = params.get("chart_id") || "";
+  const internalChartIdFromQuery = params.get("cid") || "";
+  const fromShare = Boolean(shareChartIdFromQuery);
+  const aiOpenFromQuery = String(params.get("ai") || "") === "1";
+  const aiModeFromQueryRaw = String(params.get("mode") || "").trim().toLowerCase();
+  const aiModeFromQuery:
+    | "full"
+    | "career"
+    | "wealth"
+    | "love"
+    | "children"
+    | "kinship"
+    | "health"
+    | "study"
+    | null =
+    aiModeFromQueryRaw === "career"
+      ? "career"
+      : aiModeFromQueryRaw === "wealth"
+        ? "wealth"
+        : aiModeFromQueryRaw === "love"
+          ? "love"
+          : aiModeFromQueryRaw === "children"
+            ? "children"
+            : aiModeFromQueryRaw === "kinship"
+              ? "kinship"
+              : aiModeFromQueryRaw === "health"
+                ? "health"
+                : aiModeFromQueryRaw === "study"
+                  ? "study"
+                  : aiModeFromQueryRaw === "full"
+                    ? "full"
+                    : null;
   const tabFromQuery = String(params.get("tab") || "").trim().toLowerCase();
   const initialTab: "bazi" | "hepan" = tabFromQuery === "hepan" ? "hepan" : "bazi";
   const profileIdFromQuery = useMemo(() => {
@@ -496,6 +529,10 @@ export function BaziPage() {
   /** 排盘成功后默认展示命盘与报告；仅当用户点击「全项」或任一专项解读后为 true */
   const [showAiReading, setShowAiReading] = useState(false);
   const [aiText, setAiText] = useState("");
+  const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [aiAsking, setAiAsking] = useState(false);
+  const aiChatScrollRef = useRef<HTMLDivElement | null>(null);
   /** 大模型解读请求进行中：解读结果区显示占位与预计时长 */
   const [aiGenerating, setAiGenerating] = useState(false);
   /** 同步防连点：避免 React 批处理下第二次请求在 busy 生效前发出 */
@@ -653,6 +690,8 @@ export function BaziPage() {
     setShowAiReading(false);
     setAiGenerating(false);
     setAiText("");
+    setAiMessages([]);
+    setAiQuestion("");
     setAiAnalystMode(null);
     setStatus("正在从分享链接加载...", "pending");
     try {
@@ -723,6 +762,8 @@ export function BaziPage() {
     setShowAiReading(false);
     setAiGenerating(false);
     setAiText("");
+    setAiMessages([]);
+    setAiQuestion("");
     setAiAnalystMode(null);
     setStatus("正在排盘并生成报告...", "pending");
     try {
@@ -744,6 +785,108 @@ export function BaziPage() {
       setBusy(false);
     }
   }
+
+  function storageKeyFor(chartId: string, mode: string) {
+    return `bazi_ai_chat:${chartId}:${mode}`;
+  }
+
+  function loadChatFromStorage(chartId: string, mode: string) {
+    try {
+      const raw = window.localStorage.getItem(storageKeyFor(chartId, mode));
+      if (!raw) return null;
+      const obj = JSON.parse(raw) as any;
+      if (!obj || typeof obj !== "object") return null;
+      const msgs = Array.isArray(obj.messages) ? obj.messages : null;
+      if (!msgs) return null;
+      return msgs
+        .filter((m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+        .map((m: any) => ({ role: m.role as "user" | "assistant", content: String(m.content) }));
+    } catch {
+      return null;
+    }
+  }
+
+  function saveChatToStorage(chartId: string, mode: string, messages: Array<{ role: "user" | "assistant"; content: string }>) {
+    try {
+      window.localStorage.setItem(
+        storageKeyFor(chartId, mode),
+        JSON.stringify({ chart_id: chartId, mode, messages, updated_at: Date.now() })
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  // Keep URL synced with current chart_id (internal restore: use cid to avoid "share link" mode).
+  useEffect(() => {
+    const id = chart?.chart_id || "";
+    if (!id) return;
+    const sp = new URLSearchParams(params);
+    if (sp.get("cid") !== id) {
+      sp.set("cid", id);
+      setParams(sp, { replace: true });
+    }
+  }, [chart?.chart_id, params, setParams]);
+
+  // Restore chat by URL (ai=1&mode=...) after chart is available.
+  useEffect(() => {
+    const id = chart?.chart_id || "";
+    if (!id) return;
+    if (!aiOpenFromQuery) return;
+    const mode = aiModeFromQuery || "full";
+    if (internalChartIdFromQuery && internalChartIdFromQuery !== id) return;
+    // Switch to reading view + mode.
+    setShowAiReading(true);
+    setAiAnalystMode(mode);
+    const cachedMsgs = loadChatFromStorage(id, mode);
+    if (cachedMsgs?.length) {
+      setAiMessages(cachedMsgs);
+      // best-effort set aiText to first assistant chunk for compatibility.
+      const first = cachedMsgs.find((m: any) => m.role === "assistant")?.content || "";
+      setAiText(first);
+      return;
+    }
+    // If no local chat, fetch cached long reading and seed as first assistant message.
+    setAiGenerating(true);
+    setAiText("");
+    setAiMessages([]);
+    const q =
+      mode === "career"
+        ? `chart_id=${encodeURIComponent(id)}&mode=career`
+        : mode === "wealth"
+          ? `chart_id=${encodeURIComponent(id)}&mode=wealth`
+          : mode === "love"
+            ? `chart_id=${encodeURIComponent(id)}&mode=love`
+            : mode === "children"
+              ? `chart_id=${encodeURIComponent(id)}&mode=children`
+              : mode === "kinship"
+                ? `chart_id=${encodeURIComponent(id)}&mode=kinship`
+                : mode === "health"
+                  ? `chart_id=${encodeURIComponent(id)}&mode=health`
+                  : mode === "study"
+                    ? `chart_id=${encodeURIComponent(id)}&mode=study`
+                    : `chart_id=${encodeURIComponent(id)}&mode=full`;
+    void getJsonWithTimeout<AiResp>(`/api/reports/ai?${q}&_=${Date.now()}`, 300_000)
+      .then((out) => {
+        const t = out.ai_text || "AI暂无返回";
+        setAiText(t);
+        setAiMessages([{ role: "assistant", content: t }]);
+      })
+      .catch(() => {
+        setAiMessages([{ role: "assistant", content: "解读加载失败，请点一次左侧按钮重新生成。" }]);
+      })
+      .finally(() => setAiGenerating(false));
+  }, [chart?.chart_id, aiOpenFromQuery, aiModeFromQuery, internalChartIdFromQuery, setAiAnalystMode]);
+
+  // Persist chat to localStorage (refresh won't lose).
+  useEffect(() => {
+    const id = chart?.chart_id || "";
+    const mode = aiAnalystMode || "full";
+    if (!id) return;
+    if (!showAiReading) return;
+    if (!aiMessages.length) return;
+    saveChatToStorage(id, mode, aiMessages);
+  }, [chart?.chart_id, aiAnalystMode, showAiReading, aiMessages]);
 
   async function genAi(
     mode: "full" | "career" | "wealth" | "love" | "children" | "kinship" | "health" | "study" = "full",
@@ -786,6 +929,7 @@ export function BaziPage() {
     setAiGenerating(true);
     setAiAnalystMode(mode);
     setAiText("");
+    setAiMessages([]);
     const modeLabel =
       mode === "career"
         ? "事业"
@@ -825,7 +969,14 @@ export function BaziPage() {
       // 避免 GET 被浏览器缓存；命中服务端缓存时响应很快
       const out = await getJsonWithTimeout<AiResp>(`/api/reports/ai?${q}${refreshQ}&_=${Date.now()}`, 300_000);
       setAiText(out.ai_text || "AI暂无返回");
+      setAiMessages([{ role: "assistant", content: out.ai_text || "AI暂无返回" }]);
       setAiAnalystMode(out.analyst_mode ?? mode);
+      // Sync URL to restore reading view.
+      const sp = new URLSearchParams(params);
+      sp.set("cid", ch.chart_id);
+      sp.set("ai", "1");
+      sp.set("mode", String(out.analyst_mode ?? mode));
+      setParams(sp, { replace: true });
       await track("ai_reading_view", { analyst_mode: out.analyst_mode ?? mode });
       setStatus(
         out.from_cache
@@ -863,11 +1014,45 @@ export function BaziPage() {
     }
   }
 
+  useEffect(() => {
+    if (!showAiReading) return;
+    const el = aiChatScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [showAiReading, aiMessages.length]);
+
+  async function askAi() {
+    const ch = chart;
+    const q = aiQuestion.trim();
+    if (!ch?.chart_id || !q || aiAsking) return;
+    setAiAsking(true);
+    setAiQuestion("");
+    setAiMessages((m) => [...m, { role: "user", content: q }]);
+    try {
+      const out = await postJson<{ answer: string }>(`/api/reports/ai/messages`, {
+        chart_id: ch.chart_id,
+        mode: aiAnalystMode ?? "full",
+        question: q,
+      });
+      setAiMessages((m) => [...m, { role: "assistant", content: String((out as any)?.answer || "AI暂无返回") }]);
+      // Ensure URL indicates we are in reading view for restore.
+      const sp = new URLSearchParams(params);
+      if (ch?.chart_id) sp.set("cid", ch.chart_id);
+      sp.set("ai", "1");
+      sp.set("mode", String(aiAnalystMode ?? "full"));
+      setParams(sp, { replace: true });
+    } catch {
+      setAiMessages((m) => [...m, { role: "assistant", content: "追问失败，请稍后重试。" }]);
+    } finally {
+      setAiAsking(false);
+    }
+  }
+
   // auto-load from share link
   useEffect(() => {
-    if (chartIdFromQuery) void loadFromChartId(chartIdFromQuery);
+    if (shareChartIdFromQuery) void loadFromChartId(shareChartIdFromQuery);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartIdFromQuery]);
+  }, [shareChartIdFromQuery]);
 
   /** 大模型解读仅依赖排盘 chart_id；不与页面 busy（排盘/分享）强耦合，避免误锁按钮 */
   const canGenAi = Boolean(chart?.chart_id && !aiGenerating);
@@ -1442,7 +1627,18 @@ export function BaziPage() {
                   >
                     重新生成
                   </Button>
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setShowAiReading(false)}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setShowAiReading(false);
+                      const sp = new URLSearchParams(params);
+                      sp.delete("ai");
+                      sp.delete("mode");
+                      setParams(sp, { replace: true });
+                    }}
+                  >
                     返回命盘
                   </Button>
                 </div>
@@ -1463,13 +1659,119 @@ export function BaziPage() {
                     </p>
                   </div>
                 ) : (
-                  <textarea
-                    className="min-h-[min(48vh,26rem)] w-full resize-y rounded-lg border border-[var(--border-soft)] bg-[var(--surface-panel)] p-3 text-sm leading-relaxed text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)] focus:ring-1 focus:ring-[var(--focus-ring)]"
-                    placeholder="点左侧「全项」「事业」「财运」「婚恋」「子女」「六亲」「健康」或「学业」，长文将覆盖显示在此处…"
-                    value={aiText}
-                    readOnly
-                    aria-label="解读结果正文"
-                  />
+                  <div className="min-h-[min(48vh,26rem)] rounded-lg border border-[var(--border-soft)] bg-[var(--surface-panel)]">
+                    <div ref={aiChatScrollRef} className="max-h-[min(48vh,26rem)] overflow-auto p-3 text-sm text-[var(--text-main)]">
+                      {aiMessages.length ? (
+                        <div className="grid gap-2">
+                          {aiMessages.map((m, idx) => {
+                            const isUser = m.role === "user";
+                            return (
+                              <div key={idx} className={["flex", isUser ? "justify-end" : "justify-start"].join(" ")}>
+                                <div
+                                  className={[
+                                    "max-w-[92%] rounded-2xl border px-3 py-2 leading-6 shadow-sm",
+                                    isUser
+                                      ? "border-[rgba(74,167,148,0.35)] bg-[rgba(74,167,148,0.10)] text-[var(--text-strong)]"
+                                      : "border-[var(--border-soft)] bg-white/65 text-[var(--text-main)]",
+                                  ].join(" ")}
+                                >
+                                  {isUser ? (
+                                    <div className="whitespace-pre-wrap break-words">{m.content}</div>
+                                  ) : (
+                                    <div className="break-words">
+                                      <ReactMarkdown
+                                        remarkPlugins={[remarkGfm]}
+                                        rehypePlugins={[rehypeSanitize]}
+                                        components={{
+                                          h1: ({ children }) => <div className="mb-2 mt-1 text-base font-semibold">{children}</div>,
+                                          h2: ({ children }) => <div className="mb-2 mt-2 text-sm font-semibold">{children}</div>,
+                                          h3: ({ children }) => <div className="mb-1.5 mt-2 text-sm font-semibold">{children}</div>,
+                                          p: ({ children }) => <div className="whitespace-pre-wrap">{children}</div>,
+                                          ul: ({ children }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
+                                          ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
+                                          li: ({ children }) => <li className="leading-6">{children}</li>,
+                                          blockquote: ({ children }) => (
+                                            <blockquote className="my-2 border-l-2 border-[rgba(148,163,184,0.55)] pl-3 text-[var(--text-muted)]">
+                                              {children}
+                                            </blockquote>
+                                          ),
+                                          strong: ({ children }) => (
+                                            <strong className="rounded bg-[rgba(250,204,21,0.22)] px-1 py-0.5 font-semibold text-[var(--text-strong)]">
+                                              {children}
+                                            </strong>
+                                          ),
+                                          em: ({ children }) => (
+                                            <em className="font-medium not-italic underline decoration-[rgba(250,204,21,0.55)] underline-offset-2">
+                                              {children}
+                                            </em>
+                                          ),
+                                          a: ({ href, children }) => (
+                                            <a
+                                              href={href}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="underline decoration-[rgba(74,167,148,0.45)] underline-offset-2 hover:decoration-[rgba(74,167,148,0.75)]"
+                                            >
+                                              {children}
+                                            </a>
+                                          ),
+                                          code: ({ children }) => (
+                                            <code className="rounded bg-[rgba(15,23,42,0.06)] px-1 py-0.5 text-[0.85em]">{children}</code>
+                                          ),
+                                          pre: ({ children }) => (
+                                            <pre className="my-2 overflow-auto rounded-xl border border-[var(--border-soft)] bg-white/50 p-2 text-xs leading-5">
+                                              {children}
+                                            </pre>
+                                          ),
+                                          table: ({ children }) => (
+                                            <div className="my-2 w-full overflow-x-auto">
+                                              <table className="w-full min-w-[560px] border-collapse text-sm">{children}</table>
+                                            </div>
+                                          ),
+                                          thead: ({ children }) => <thead className="bg-black/5">{children}</thead>,
+                                          tbody: ({ children }) => <tbody>{children}</tbody>,
+                                          tr: ({ children }) => <tr className="border-b border-[var(--border-soft)]">{children}</tr>,
+                                          th: ({ children }) => (
+                                            <th className="whitespace-nowrap px-3 py-2 text-left text-xs font-semibold text-[var(--text-muted)]">
+                                              {children}
+                                            </th>
+                                          ),
+                                          td: ({ children }) => <td className="px-3 py-2 align-top leading-6">{children}</td>,
+                                        }}
+                                      >
+                                        {m.content}
+                                      </ReactMarkdown>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="text-xs text-[var(--text-muted)]">
+                          点左侧「全项」「事业」「财运」「婚恋」「子女」「六亲」「健康」或「学业」，解读会以对话形式展示在这里…
+                        </div>
+                      )}
+                    </div>
+                    <div className="border-t border-[var(--border-soft)] p-3">
+                      <div className="flex gap-2">
+                        <input
+                          value={aiQuestion}
+                          onChange={(e) => setAiQuestion(e.target.value)}
+                          placeholder="继续追问：例如我该注意什么？接下来一年怎么做？"
+                          className="h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                          disabled={aiGenerating || aiAsking || !showAiReading}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void askAi();
+                          }}
+                        />
+                        <Button type="button" variant="secondary" size="sm" disabled={!aiQuestion.trim() || aiAsking || aiGenerating} onClick={() => void askAi()}>
+                          {aiAsking ? "发送中" : "发送"}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>

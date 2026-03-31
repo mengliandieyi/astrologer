@@ -11,7 +11,11 @@ let ready = false;
 async function ensureMysql(): Promise<mysql.Pool> {
   if (!mysqlUrl) throw new Error("MYSQL_URL_NOT_SET");
   if (!pool) {
-    pool = mysql.createPool(mysqlUrl);
+    const sep = mysqlUrl.includes("?") ? "&" : "?";
+    const urlWithOpts =
+      mysqlUrl +
+      `${sep}connectTimeout=6000&enableKeepAlive=true&keepAliveInitialDelay=0&connectionLimit=6&waitForConnections=true`;
+    pool = mysql.createPool(urlWithOpts);
   }
   if (!ready) {
     await pool.execute(`

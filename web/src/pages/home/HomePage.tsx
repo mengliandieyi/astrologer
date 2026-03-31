@@ -160,7 +160,7 @@ export function HomePage() {
               </p>
             </div>
             <div className="home-landing-card-footer">
-              <span className="home-landing-badge">MVP</span>
+              <span className="home-landing-badge">可用</span>
               <Link
                 to="/stocks"
                 className="home-landing-btn"
@@ -202,7 +202,7 @@ export function HomePage() {
               </p>
             </div>
             <div className="home-landing-card-footer">
-              <span className="home-landing-badge">MVP</span>
+              <span className="home-landing-badge">可用</span>
               <Link
                 to="/travel"
                 className="home-landing-btn"
@@ -244,7 +244,7 @@ export function HomePage() {
               </p>
             </div>
             <div className="home-landing-card-footer">
-              <span className="home-landing-badge">MVP</span>
+              <span className="home-landing-badge">可用</span>
               <Link
                 to="/comic"
                 className="home-landing-btn"

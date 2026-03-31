@@ -269,13 +269,13 @@ export function Workspace() {
               <ToolCard featured icon="观" title="八字排盘 · 灵犀解读" subtitle="真太阳时 · 流年 · 证据链" desc="结论先行，证据为凭。" href="/bazi" tag="可用" tone="bazi" cta="去排盘" />
             </motion.div>
             <motion.div variants={fadeUp}>
-              <ToolCard icon="势" title="资研参详 · 灵犀研判" subtitle="摘要 · 风险 · 核验清单" desc="材料入手，一页研判。" href="/stocks" tag="MVP" tone="stocks" cta="去研判" />
+              <ToolCard icon="势" title="资研参详 · 灵犀研判" subtitle="摘要 · 风险 · 核验清单" desc="材料入手，一页研判。" href="/stocks" tag="可用" tone="stocks" cta="去研判" />
             </motion.div>
             <motion.div variants={fadeUp}>
-              <ToolCard icon="定" title="行旅筹划 · 灵犀行程" subtitle="行程 · 预算 · 清单" desc="路线预算，一次成行。" href="/travel" tag="MVP" tone="travel" cta="去成行" />
+              <ToolCard icon="定" title="行旅筹划 · 灵犀行程" subtitle="行程 · 预算 · 清单" desc="路线预算，一次成行。" href="/travel" tag="可用" tone="travel" cta="去成行" />
             </motion.div>
             <motion.div variants={fadeUp}>
-              <ToolCard icon="行" title="漫剧工坊 · 灵犀分镜" subtitle="分镜 · 对白 · 留钩" desc="轻喜开稿，一键分镜。" href="/comic" tag="MVP" tone="comic" cta="去开稿" />
+              <ToolCard icon="行" title="漫剧工坊 · 灵犀分镜" subtitle="分镜 · 对白 · 留钩" desc="轻喜开稿，一键分镜。" href="/comic" tag="可用" tone="comic" cta="去开稿" />
             </motion.div>
           </div>
         </motion.section>

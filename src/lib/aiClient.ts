@@ -46,6 +46,45 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+export async function qwenChatCompletion(args: {
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  model?: string;
+  temperature?: number;
+}): Promise<{ ok: true; text: string; model: string } | { ok: false; error: string }> {
+  const apiKey = process.env.ALI_API_KEY?.trim();
+  if (!apiKey) return { ok: false as const, error: "ALI_API_KEY_NOT_SET" };
+  const baseUrl = (process.env.ALI_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const model = (args.model || process.env.ALI_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  const body = JSON.stringify({
+    model,
+    temperature: args.temperature ?? 0.4,
+    enable_thinking: false,
+    messages: args.messages,
+  });
+  try {
+    let res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body,
+    });
+    if (res.status === 429) {
+      await sleep(2500);
+      res = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body,
+      });
+    }
+    if (!res.ok) return { ok: false as const, error: await res.text() };
+    const data = (await res.json()) as ChatResponse;
+    const content = data.choices?.[0]?.message?.content?.trim() || "";
+    if (!content) return { ok: false as const, error: "EMPTY_RESPONSE" };
+    return { ok: true as const, text: content, model };
+  } catch (e: any) {
+    return { ok: false as const, error: String(e?.message || e) };
+  }
+}
+
 export async function generateAiReading(input: AiInput): Promise<string> {
   const apiKey = process.env.ALI_API_KEY?.trim();
   if (!apiKey) {

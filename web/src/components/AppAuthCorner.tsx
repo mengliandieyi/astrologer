@@ -12,6 +12,7 @@ export function AppAuthCorner() {
   const shouldHide =
     p0 === "/bazi" ||
     p0 === "/" ||
+    p0 === "/stocks" ||
     p0 === "/my/profiles" ||
     p0 === "/my/charts" ||
     p0 === "/hepan" ||

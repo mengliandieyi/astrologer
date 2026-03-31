@@ -13,6 +13,7 @@ import { getProReportDynamic, trackEvent } from "./api/mvpHandlers.js";
 import type { BirthMeta } from "./lib/baziExtendedMeta.js";
 import { calculateBaziFromSolar } from "./lib/baziCalculator.js";
 import { generateAiReading } from "./lib/aiClient.js";
+import { registerStocksRoutes } from "./api/stocksHandlers.js";
 import { enrichChartFortuneCycles } from "./lib/enrichChartFortunes.js";
 import {
   createUser,
@@ -314,9 +315,14 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
 app.get("/api/auth/me", async (req, res) => {
   const uid = getAuthedUserId(req);
   if (!uid) return res.json({ logged_in: false });
-  const u = await getUserById(uid);
-  if (!u) return res.json({ logged_in: false });
-  return res.json({ logged_in: true, user: u });
+  try {
+    const u = await getUserById(uid);
+    if (!u) return res.json({ logged_in: false });
+    return res.json({ logged_in: true, user: u });
+  } catch (e: any) {
+    // DB/network issues should not crash the server; treat as transient.
+    return res.status(503).json({ error: "auth_backend_unavailable", logged_in: false, detail: String(e?.message || e) });
+  }
 });
 
 app.post("/api/auth/register", async (req, res) => {
@@ -335,6 +341,18 @@ app.post("/api/auth/register", async (req, res) => {
 
 function hashHex(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex");
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, code = "timeout"): Promise<T> {
+  let t: any = null;
+  const timeout = new Promise<T>((_, rej) => {
+    t = setTimeout(() => rej(Object.assign(new Error(code), { code })), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
 }
 
 function publicOrigin(req: express.Request): string {
@@ -391,9 +409,9 @@ app.post("/api/auth/login", async (req, res) => {
     const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identRaw);
     if (isEmail) {
       const email = String(identRaw).toLowerCase();
-      const u0 = await getUserByEmail(email);
+      const u0 = await withTimeout(getUserByEmail(email), 7000, "auth_db_timeout");
       if (!u0) return res.status(401).json({ error: "invalid_credentials" });
-      const u = await getUserByUsername(u0.username);
+      const u = await withTimeout(getUserByUsername(u0.username), 7000, "auth_db_timeout");
       if (!u) return res.status(401).json({ error: "invalid_credentials" });
       const ok = await verifyPassword(password, u.password_hash);
       if (!ok) return res.status(401).json({ error: "invalid_credentials" });
@@ -403,7 +421,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     const username = validateUsername(identRaw);
-    const u = await getUserByUsername(username);
+    const u = await withTimeout(getUserByUsername(username), 7000, "auth_db_timeout");
     if (!u) return res.status(401).json({ error: "invalid_credentials" });
     const ok = await verifyPassword(password, u.password_hash);
     if (!ok) return res.status(401).json({ error: "invalid_credentials" });
@@ -411,7 +429,15 @@ app.post("/api/auth/login", async (req, res) => {
     setAuthCookie(res, token, cookieSecure(req));
     return res.json({ user: { id: u.id, username: u.username } });
   } catch (e: any) {
-    return res.status(400).json({ error: String(e?.message || e) });
+    const msg = String(e?.message || e || "");
+    // Surface transient DB/network errors as 503 so frontend doesn't spin forever.
+    if (
+      /EADDRNOTAVAIL|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|PROTOCOL_CONNECTION_LOST/i.test(msg) ||
+      String((e as any)?.code || "").toUpperCase().includes("EADDRNOTAVAIL")
+    ) {
+      return res.status(503).json({ error: "auth_backend_unavailable" });
+    }
+    return res.status(400).json({ error: msg });
   }
 });
 
@@ -419,6 +445,9 @@ app.post("/api/auth/logout", (req, res) => {
   clearAuthCookie(res, cookieSecure(req));
   return res.status(204).send();
 });
+
+// Stocks / 资研参详
+registerStocksRoutes(app, requireAuth);
 
 app.get("/api/me/charts", requireAuth, async (req, res) => {
   const uid = (req as any).userId as number;
@@ -759,29 +788,58 @@ app.post("/api/hepan/compute", requireAuth, async (req, res) => {
     );
 
     const prompt = `
-你是严谨、结构化、可执行的合盘分析师，请用简体中文输出。
-要求：避免玄学口吻与夸张断言；用“适配/风险/建议”的方式表达；不要输出用户隐私数据（手机号/邮箱）。
+你是严谨、结构化、可执行的「合盘」分析师。请用简体中文输出，允许使用 Markdown（标题/列表/引用/加粗）。
+写作要求：
+- 不要玄学口吻与夸张断言；用“倾向/条件/概率/边界”表达。
+- 不要输出任何隐私数据（手机号/邮箱/住址等）。
+- 结论要可执行：给到「怎么做」「怎么沟通」「怎么设边界」「怎么止损」。
+- 先给总评，再给证据与建议；避免堆术语。
+- **重点适度**：全篇使用 Markdown 加粗（**...**）不超过 12 处；每个小节最多 2 处加粗，且只加粗“结论/风险/建议标题”这类关键词，避免满屏红。
+- 建议条目尽量使用“- **标题**：内容”格式，但不要每句都加粗。
+- **必须足够丰富**：总字数不少于 1200 字（不含分隔线），不要只写 3-5 条就结束；每节都要有内容。
+- 论证方式：先讲“你们分别是什么风格/需求”，再讲“组合后会发生什么”，最后给“怎么做”。
 
-两人关系：${relation || "未指定"}
+关系设定：${relation || "未指定（按亲密关系/长期合作的通用口径）"}
 
-对象A：${pA.name}（性别：${birthA.gender === 0 ? "女" : "男"}，历法：${birthA.cal === "lunar" ? "农历" : "公历"}）
+对象A：${pA.name}（性别：${birthA.gender === 0 ? "女" : "男"}；历法：${birthA.cal === "lunar" ? "农历" : "公历"}）
 四柱：年${chartA.pillars.year} 月${chartA.pillars.month} 日${chartA.pillars.day} 时${chartA.pillars.hour}
 日主强弱：${chartA.day_master?.strength_level ?? ""} ${chartA.day_master?.strength_score ?? ""}
-喜用：${(chartA.day_master?.useful_elements ?? []).join("、")}
-忌神：${(chartA.day_master?.avoid_elements ?? []).join("、")}
+喜用：${(chartA.day_master?.useful_elements ?? []).join("、") || "—"}
+忌神：${(chartA.day_master?.avoid_elements ?? []).join("、") || "—"}
 
-对象B：${pB.name}（性别：${birthB.gender === 0 ? "女" : "男"}，历法：${birthB.cal === "lunar" ? "农历" : "公历"}）
+对象B：${pB.name}（性别：${birthB.gender === 0 ? "女" : "男"}；历法：${birthB.cal === "lunar" ? "农历" : "公历"}）
 四柱：年${chartB.pillars.year} 月${chartB.pillars.month} 日${chartB.pillars.day} 时${chartB.pillars.hour}
 日主强弱：${chartB.day_master?.strength_level ?? ""} ${chartB.day_master?.strength_score ?? ""}
-喜用：${(chartB.day_master?.useful_elements ?? []).join("、")}
-忌神：${(chartB.day_master?.avoid_elements ?? []).join("、")}
+喜用：${(chartB.day_master?.useful_elements ?? []).join("、") || "—"}
+忌神：${(chartB.day_master?.avoid_elements ?? []).join("、") || "—"}
 
-输出结构：
-1) 一句话总评（<=25字）
-2) 适配亮点（3条）
-3) 主要冲突点（3条，给出触发场景）
-4) 相处建议（5条，可执行）
-5) 风险与兜底（3条）
+请按「八字解读」同款风格输出以下结构（必须逐段输出）：
+
+## 1) 一句话总评（<=25字）
+- 用“适配度 + 风险点 + 建议动作”一句话说清（句内至少 1 处加粗重点）
+
+## 2) 匹配度拆解（打分 + 解释）
+- 维度与分数（0–10）：情绪与安全感 / 沟通与冲突 / 价值观与目标 / 金钱与责任 / 亲密与边界 / 长期稳定性
+- 每个维度给 2 句理由（结合双方强弱/喜忌/性格倾向），并给 1 条可执行建议
+
+## 3) 适配亮点（3–5条）
+- 每条包含：亮点 → 触发条件 → 具体用法（如何让它变成优势）
+
+## 4) 主要冲突点（3–5条，带触发场景）
+- 每条包含：冲突点 → 典型触发场景 → 你们分别会怎么反应 → 怎么化解
+
+## 5) 相处/合作建议（可执行，8–12条）
+- 覆盖：沟通节奏、金钱与责任分工、亲密边界、家庭/事业优先级、冲突复盘方式
+- 建议要“可落地”：每条都给出一句可直接照着说的话，或一个具体规则/约定
+
+## 6) 红线与止损（3条）
+- 明确哪些情况需要暂停、冷静期、第三方介入或分开
+
+## 7) 未来3个月的实践计划（轻量）
+- 以周为单位给 3–6 个小目标（例如：每周一次复盘、每月一次共同目标对齐）
+
+## 8) 追问建议（给用户 5 个可继续问的问题）
+- 例如：我该怎么说才能让TA听进去？我们最大风险点是什么？金钱怎么约定？等等
 `.trim();
 
     const aiText = await generateGenericAiText(prompt);
@@ -805,6 +863,60 @@ app.post("/api/hepan/compute", requireAuth, async (req, res) => {
       provider,
     });
     return res.json({ report: saved, from_cache: false });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/hepan/:reportId/messages", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  try {
+    const rid = Number(req.params.reportId ?? "");
+    if (!Number.isFinite(rid) || rid <= 0) return res.status(400).json({ error: "report_id_required" });
+    const question = String(req.body?.question ?? "").trim();
+    if (!question) return res.status(400).json({ error: "question_required" });
+    const report = await getHepanReportById(uid, Math.floor(rid));
+    if (!report) return res.status(404).json({ error: "hepan_not_found" });
+
+    const provider = process.env.ALI_API_KEY ? "qwen" : "fallback";
+    if (!process.env.ALI_API_KEY) {
+      return res.json({
+        report_id: report.id,
+        provider,
+        answer: "当前未配置通义密钥，追问暂不可用。请在 `.env` 配置 `ALI_API_KEY` 与 `ALI_MODEL=qwen3-max` 后重启服务。",
+      });
+    }
+
+    const { qwenChatCompletion } = await import("./lib/aiClient.js");
+    const ctx = String(report.ai_text || "").slice(0, 7000);
+    const out = await qwenChatCompletion({
+      model: process.env.ALI_MODEL?.trim() || "qwen3-max",
+      temperature: 0.35,
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是严谨、可执行的合盘解读助手。用简体中文回答，允许使用 Markdown（标题/列表/引用/加粗）。先给结论，再给依据与可执行建议；不要输出隐私信息；不要夸张断言。重点适度：全篇加粗不超过 8 处，只加粗关键结论/风险/建议标题，避免满屏加粗。建议尽量用“- **标题**：内容”输出，但不要每句都加粗。",
+        },
+        {
+          role: "user",
+          content: [
+            `report_id=${report.id}`,
+            `关系=${String((report.payload as any)?.relation || "") || "未指定"}`,
+            `对象A=${String(report.profile_name_a || "A")}`,
+            `对象B=${String(report.profile_name_b || "B")}`,
+            "",
+            ctx ? "已有合盘解读（上下文）：" : "已有合盘解读（上下文）：（无）",
+            ctx,
+            "",
+            "用户追问：",
+            question,
+          ].join("\n"),
+        },
+      ],
+    });
+    if (!out.ok) return res.json({ report_id: report.id, provider, answer: "追问失败，请稍后重试。" });
+    return res.json({ report_id: report.id, provider, answer: out.text });
   } catch (e: any) {
     return res.status(400).json({ error: String(e?.message || e) });
   }
@@ -912,6 +1024,98 @@ app.get("/api/reports/ai", async (req, res) => {
     provider,
     from_cache: false,
   });
+});
+
+app.post("/api/reports/ai/messages", async (req, res) => {
+  try {
+    const chartId = String(req.body?.chart_id ?? "");
+    const question = String(req.body?.question ?? "").trim();
+    const modeRaw = String(req.body?.mode ?? "").toLowerCase();
+    const analyst_mode:
+      | "full"
+      | "career"
+      | "wealth"
+      | "love"
+      | "children"
+      | "kinship"
+      | "health"
+      | "study" =
+      modeRaw === "career"
+        ? "career"
+        : modeRaw === "wealth"
+          ? "wealth"
+          : modeRaw === "love"
+            ? "love"
+            : modeRaw === "children"
+              ? "children"
+              : modeRaw === "kinship"
+                ? "kinship"
+                : modeRaw === "health"
+                  ? "health"
+                  : modeRaw === "study"
+                    ? "study"
+                    : "full";
+    if (!chartId) return res.status(400).json({ error: "chart_id_required" });
+    if (!question) return res.status(400).json({ error: "question_required" });
+    const chart = await getChart(chartId);
+    if (!chart) return res.status(404).json({ error: "chart_not_found" });
+
+    const strongest = maxElement(chart.five_elements);
+    const weakest = minElement(chart.five_elements);
+
+    // Use cached long reading as context if available (cheap + stable).
+    const cached = await getAiReadingCache(chartId, analyst_mode);
+    const baseReading = cached?.ai_text || "";
+
+    const provider = process.env.ALI_API_KEY ? "qwen" : "fallback";
+    if (!process.env.ALI_API_KEY) {
+      return res.json({
+        chart_id: chartId,
+        mode: analyst_mode,
+        provider,
+        answer:
+          "当前未配置通义密钥，追问暂不可用。你可以先在 `.env` 配置 `ALI_API_KEY` 与 `ALI_MODEL=qwen3-max`，再重启服务后重试。",
+      });
+    }
+
+    const { qwenChatCompletion } = await import("./lib/aiClient.js");
+    const out = await qwenChatCompletion({
+      model: process.env.ALI_MODEL?.trim() || "qwen3-max",
+      temperature: 0.35,
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是严谨、可执行的八字解读助手。用简体中文回答，允许使用 Markdown（标题/列表/引用/加粗）。先给结论，再给依据与行动建议；避免玄虚与夸张断言。",
+        },
+        {
+          role: "user",
+          content: [
+            `chart_id=${chartId}`,
+            `analyst_mode=${analyst_mode}`,
+            `一句话=${chart.user_readable?.one_line || chart.basic_summary || "—"}`,
+            `格局=${chart.ge_ju || "—"}`,
+            `五行偏强=${toCnElement(strongest)}`,
+            `五行偏弱=${toCnElement(weakest)}`,
+            `喜用=${(chart.day_master?.useful_elements || []).join("、") || "—"}`,
+            `忌神=${(chart.day_master?.avoid_elements || []).join("、") || "—"}`,
+            "",
+            baseReading ? "已有解读（摘要/上下文）：" : "已有解读（摘要/上下文）：（无缓存）",
+            baseReading ? baseReading.slice(0, 6000) : "",
+            "",
+            "用户追问：",
+            question,
+          ].join("\n"),
+        },
+      ],
+    });
+    if (!out.ok) {
+      return res.json({ chart_id: chartId, mode: analyst_mode, provider, answer: "追问失败，请稍后重试。" });
+    }
+    return res.json({ chart_id: chartId, mode: analyst_mode, provider, answer: out.text });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
 });
 
 app.post("/api/ai/generate", async (req, res) => {
