@@ -5,7 +5,8 @@ module.exports = {
     {
       name: "astrologer",
       cwd: path.join(__dirname),
-      script: "dist/server.js",
+      // IMPORTANT: bootstrap loads dotenv BEFORE importing server (ESM static import order).
+      script: "dist/bootstrap.js",
       interpreter: "node",
       node_args: "--enable-source-maps",
       instances: 1,
