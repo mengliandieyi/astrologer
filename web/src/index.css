@@ -16,19 +16,19 @@
     --surface-soft: rgba(255, 255, 255, 0.66);
     --surface-soft-2: rgba(255, 255, 255, 0.84);
 
-    --border-main: rgba(186, 160, 225, 0.30);
-    --border-soft: rgba(188, 166, 224, 0.38);
+    --border-main: rgba(140, 120, 180, 0.45);
+    --border-soft: rgba(160, 140, 200, 0.50);
 
-    --text-strong: #4d3f6f;
-    --text-main: #5b4c7a;
-    --text-soft: #6b5b8b;
-    --text-muted: #78669a;
+    --text-strong: #2d2350;
+    --text-main: #3d2e5f;
+    --text-soft: #4d3d6f;
+    --text-muted: #5a4a7a;
 
     --brand-soft: linear-gradient(135deg, #e8d3fb, #c7eadf);
     --brand-text: #4d3d6f;
     --focus-ring: rgba(158, 126, 210, 0.35);
-    --elev-soft: 0 8px 20px rgba(129, 104, 172, 0.20);
-    --elev-card: 0 10px 26px rgba(95, 74, 138, 0.08);
+    --elev-soft: 0 8px 24px rgba(100, 80, 150, 0.28);
+    --elev-card: 0 12px 32px rgba(80, 60, 130, 0.15);
   }
   html,
   body {
@@ -752,22 +752,23 @@
     flex-shrink: 0;
   }
   .home-landing-card-title h3 {
-    font-size: 1.28rem;
+    font-size: 1.32rem;
     font-weight: 800;
     line-height: 1.36;
-    color: #4b3f67;
+    color: #2d2350;
   }
   .home-landing-card-title p {
-    color: #6d5d8f;
-    font-size: 0.92rem;
+    color: #4d3d6f;
+    font-size: 0.94rem;
     line-height: 1.68;
     margin-top: 0.28rem;
+    font-weight: 500;
   }
   .home-landing-card-desc {
     font-size: 1rem;
-    line-height: 1.66;
+    line-height: 1.68;
     margin: 0.3rem 0 0.34rem;
-    color: #5f4f80;
+    color: #3d2e5f;
     font-weight: 600;
   }
   .home-landing-card-footer {
