@@ -634,7 +634,7 @@ export function BaziPage() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [authLoggedIn, activeProfileId]);
 
   const timezoneLabel = useMemo(() => {

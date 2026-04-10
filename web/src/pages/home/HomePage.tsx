@@ -180,11 +180,11 @@ export function HomePage() {
           className="home-landing-card home-landing-card--xinglv"
           role="button"
           tabIndex={0}
-          onClick={(e) => splashAndNavigate(e.currentTarget, "/travel", navigate)}
+          onClick={(e) => splashAndNavigate(e.currentTarget, "/xinglv", navigate)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              splashAndNavigate(e.currentTarget, "/travel", navigate);
+              splashAndNavigate(e.currentTarget, "/xinglv", navigate);
             }
           }}
         >
@@ -204,12 +204,12 @@ export function HomePage() {
             <div className="home-landing-card-footer">
               <span className="home-landing-badge">可用</span>
               <Link
-                to="/travel"
+                to="/xinglv"
                 className="home-landing-btn"
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  splashAndNavigate(e.currentTarget.closest(".home-landing-card"), "/travel", navigate);
+                  splashAndNavigate(e.currentTarget.closest(".home-landing-card"), "/xinglv", navigate);
                 }}
               >
                 去成行

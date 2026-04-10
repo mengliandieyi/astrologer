@@ -14,6 +14,7 @@ import type { BirthMeta } from "./lib/baziExtendedMeta.js";
 import { calculateBaziFromSolar } from "./lib/baziCalculator.js";
 import { generateAiReading } from "./lib/aiClient.js";
 import { registerStocksRoutes } from "./api/stocksHandlers.js";
+import { registerTravelRoutes } from "./api/travelHandlers.js";
 import { enrichChartFortuneCycles } from "./lib/enrichChartFortunes.js";
 import {
   createUser,
@@ -199,7 +200,17 @@ app.get("/stocks", (_req, res) => {
   res.sendFile(path.join(publicDir, "stocks.html"));
 });
 
-app.get("/travel", (_req, res) => {
+app.get("/xinglv", (_req, res) => {
+  if (spaBuilt) return sendSpaIndex(res);
+  res.sendFile(path.join(publicDir, "travel.html"));
+});
+
+app.get("/xinglv/recommend", (_req, res) => {
+  if (spaBuilt) return sendSpaIndex(res);
+  res.sendFile(path.join(publicDir, "travel.html"));
+});
+
+app.get("/xinglv/plan", (_req, res) => {
   if (spaBuilt) return sendSpaIndex(res);
   res.sendFile(path.join(publicDir, "travel.html"));
 });
@@ -236,6 +247,12 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     storage_mode: getStorageMode(),
+    git_sha:
+      process.env.GIT_SHA ||
+      process.env.VERCEL_GIT_COMMIT_SHA ||
+      process.env.RENDER_GIT_COMMIT ||
+      process.env.HEROKU_SLUG_COMMIT ||
+      null,
     uptime_sec: Math.floor(process.uptime()),
     now: new Date().toISOString(),
   });
@@ -448,6 +465,9 @@ app.post("/api/auth/logout", (req, res) => {
 
 // Stocks / 资研参详
 registerStocksRoutes(app, requireAuth);
+
+// Travel / 行旅筹划
+registerTravelRoutes(app);
 
 app.get("/api/me/charts", requireAuth, async (req, res) => {
   const uid = (req as any).userId as number;

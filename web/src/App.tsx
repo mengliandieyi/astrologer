@@ -14,6 +14,7 @@ import { MyProfiles } from "./pages/workspace/MyProfiles";
 import { HepanPage } from "./pages/hepan/HepanPage";
 import { MyHepan } from "./pages/hepan/MyHepan";
 import { StocksPage } from "./pages/stocks/StocksPage";
+import { TravelPage } from "./pages/travel/TravelPage";
 
 function ThemeGate() {
   const loc = useLocation();
@@ -21,6 +22,7 @@ function ThemeGate() {
     const p = loc.pathname || "";
     const shouldUseBaziTheme = p === "/bazi" || p === "/my/profiles" || p === "/hepan" || p === "/my/hepan";
     const shouldUseStocksTheme = p === "/stocks";
+    const shouldUseTravelTheme = p === "/xinglv" || p.startsWith("/xinglv/");
     if (shouldUseBaziTheme) {
       document.documentElement.classList.add("theme-bazi");
     } else {
@@ -30,6 +32,11 @@ function ThemeGate() {
       document.documentElement.classList.add("theme-stocks");
     } else {
       document.documentElement.classList.remove("theme-stocks");
+    }
+    if (shouldUseTravelTheme) {
+      document.documentElement.classList.add("theme-travel");
+    } else {
+      document.documentElement.classList.remove("theme-travel");
     }
   }, [loc.pathname]);
   return null;
@@ -58,7 +65,9 @@ function AnimatedRoutes() {
           <Route path="/hepan" element={<HepanPage />} />
           <Route path="/my/hepan" element={<MyHepan />} />
           <Route path="/stocks" element={<StocksPage />} />
-          <Route path="/travel" element={<Placeholder title="行旅筹划" hint="将接入行程生成、预算拆分与清单。" />} />
+          <Route path="/xinglv" element={<TravelPage />} />
+          <Route path="/xinglv/recommend" element={<TravelPage />} />
+          <Route path="/xinglv/plan" element={<TravelPage />} />
           <Route path="/comic" element={<Placeholder title="漫剧工坊" hint="将接入分镜脚本与角色卡模板。" />} />
         </Routes>
       </motion.div>

@@ -7,7 +7,6 @@ type Props = {
   placeholder: string;
   disabled?: boolean;
   emptyHint?: string;
-  /** 失焦时传入当前输入值，避免父组件闭包读到旧 state */
   onInputBlur?: (value: string) => void;
   inputClassName: string;
 };
@@ -15,10 +14,7 @@ type Props = {
 export function RegionCombobox(props: Props) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const valueRef = useRef(props.value);
   const listId = useId();
-
-  valueRef.current = props.value;
 
   useEffect(() => {
     if (!open) return;
@@ -43,7 +39,7 @@ export function RegionCombobox(props: Props) {
         onChange={(e) => props.onValueChange(e.target.value)}
         onBlur={() => {
           setOpen(false);
-          window.setTimeout(() => props.onInputBlur?.(valueRef.current), 0);
+          window.setTimeout(() => props.onInputBlur?.(props.value), 0);
         }}
         placeholder={props.placeholder}
         autoComplete="off"

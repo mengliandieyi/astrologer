@@ -12,7 +12,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(err: unknown) {
-    // eslint-disable-next-line no-console
+     
     console.error("[ui_error_boundary]", err);
   }
 

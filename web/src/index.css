@@ -380,6 +380,16 @@
       overflow-y: auto;
     }
   }
+  /* 行旅页：表单与行程结果可能超过一屏，桌面端取消 100vh + overflow:hidden */
+  @media (min-width: 769px) {
+    .page-travel.home-landing {
+      height: auto;
+      min-height: 100vh;
+      min-height: 100dvh;
+      max-height: none;
+      overflow-y: auto;
+    }
+  }
   .page-bazi .bazi-status-pending {
     animation: bazi-status-pending-pulse 1.6s ease-in-out infinite;
   }
@@ -560,6 +570,66 @@
   }
   html.theme-stocks .home-landing-mascot-icon {
     background: linear-gradient(135deg, rgba(245, 224, 138, 0.9), rgba(201, 162, 39, 0.85));
+  }
+
+  /* 行旅页：与首页「行旅筹划」卡片 home-landing-card--xinglv 同系（浅蓝底 + 蓝青强调） */
+  html.theme-travel {
+    --text-strong: #2a3d58;
+    --text-main: #355579;
+    --text-muted: #4a6288;
+    --text-soft: #5a6f92;
+    --border-soft: rgba(157, 192, 230, 0.52);
+    --border-main: rgba(134, 172, 216, 0.42);
+    --surface-soft: rgba(255, 255, 255, 0.82);
+    --surface-soft-2: rgba(255, 255, 255, 0.94);
+    --surface-panel: rgba(255, 255, 255, 0.9);
+    --surface-card: rgba(255, 255, 255, 0.88);
+    --surface-card-2: rgba(216, 232, 252, 0.45);
+    --focus-ring: rgba(95, 141, 198, 0.45);
+    --brand-soft: linear-gradient(135deg, #b8d4f0, #86acd8);
+    --brand-text: #243d5c;
+    --elev-soft: 0 8px 22px rgba(53, 85, 121, 0.14);
+    --elev-card: 0 10px 26px rgba(53, 85, 121, 0.1);
+  }
+  html.theme-travel body {
+    background:
+      radial-gradient(900px 480px at 4% -6%, rgba(134, 172, 216, 0.22), transparent 65%),
+      radial-gradient(820px 420px at 96% 4%, rgba(157, 192, 230, 0.18), transparent 58%),
+      linear-gradient(165deg, #eef4fc, #e4edf8 55%, #eef3fb);
+    color: var(--text-main);
+  }
+  html.theme-travel .home-soft-stage {
+    background: linear-gradient(135deg, #eef4fc 0%, #e4edf8 45%, #f0f5fc 100%);
+  }
+  html.theme-travel .home-soft-stage::before {
+    opacity: 0.26;
+  }
+  html.theme-travel .home-logo-circle {
+    background: linear-gradient(135deg, #a8c8ec, #6b9fd4);
+    box-shadow: 0 0 20px rgba(95, 141, 198, 0.22);
+  }
+  html.theme-travel .home-landing-title {
+    background: linear-gradient(95deg, #355579, #5f8dc6);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  html.theme-travel .home-landing-subline {
+    color: var(--text-muted);
+  }
+  html.theme-travel .home-landing-mascot-text {
+    color: var(--text-muted);
+  }
+  html.theme-travel .home-logo-text {
+    color: #355579;
+  }
+  html.theme-travel .home-help-btn {
+    color: #355579;
+    border-color: rgba(157, 192, 230, 0.55);
+    background: rgba(255, 255, 255, 0.88);
+  }
+  html.theme-travel .home-landing-mascot-icon {
+    background: linear-gradient(135deg, rgba(184, 212, 240, 0.95), rgba(95, 141, 198, 0.88));
   }
 
   /* 资研参详：让 header 与 tabs 更贴近（对齐八字页观感） */
@@ -1188,3 +1258,11 @@
   }
 }
 
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}

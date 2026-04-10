@@ -30,7 +30,7 @@ function Topbar() {
           <Link to="/stocks">资研</Link>
         </Button>
         <Button asChild variant="ghost" size="sm">
-          <Link to="/travel">行旅</Link>
+          <Link to="/xinglv">行旅</Link>
         </Button>
         <Button asChild variant="ghost" size="sm">
           <Link to="/comic">漫剧</Link>
@@ -272,7 +272,7 @@ export function Workspace() {
               <ToolCard icon="势" title="资研参详 · 灵犀研判" subtitle="摘要 · 风险 · 核验清单" desc="材料入手，一页研判。" href="/stocks" tag="可用" tone="stocks" cta="去研判" />
             </motion.div>
             <motion.div variants={fadeUp}>
-              <ToolCard icon="定" title="行旅筹划 · 灵犀行程" subtitle="行程 · 预算 · 清单" desc="路线预算，一次成行。" href="/travel" tag="可用" tone="travel" cta="去成行" />
+              <ToolCard icon="定" title="行旅筹划 · 灵犀行程" subtitle="行程 · 预算 · 清单" desc="路线预算，一次成行。" href="/xinglv" tag="可用" tone="travel" cta="去成行" />
             </motion.div>
             <motion.div variants={fadeUp}>
               <ToolCard icon="行" title="漫剧工坊 · 灵犀分镜" subtitle="分镜 · 对白 · 留钩" desc="轻喜开稿，一键分镜。" href="/comic" tag="可用" tone="comic" cta="去开稿" />
