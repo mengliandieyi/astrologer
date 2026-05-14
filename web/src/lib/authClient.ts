@@ -1,32 +1,9 @@
+import { getJson, postJson, patchJson, delJson } from "./http";
+
 export type MeResp =
   | { logged_in: false }
   | { logged_in: true; user: { id: number; username: string } };
 
-function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit & { timeoutMs?: number } = {}) {
-  const timeoutMs = init.timeoutMs ?? 8000;
-  const ctrl = new AbortController();
-  const t = window.setTimeout(() => ctrl.abort(), timeoutMs);
-  const merged: RequestInit = { ...init, signal: ctrl.signal };
-  delete (merged as any).timeoutMs;
-  return fetch(input, merged).finally(() => window.clearTimeout(t));
-}
-
-async function postJson<T>(url: string, payload: unknown): Promise<T> {
-  const res = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    timeoutMs: 10_000,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return (await res.json()) as T;
-}
-
-async function getJson<T>(url: string): Promise<T> {
-  const res = await fetchWithTimeout(url, { cache: "no-store", timeoutMs: 8000 });
-  if (!res.ok) throw new Error(await res.text());
-  return (await res.json()) as T;
-}
 
 export async function authMe(): Promise<MeResp> {
   // Deduplicate frequent calls across headers/pages (URL param changes, etc.).
@@ -39,11 +16,11 @@ export async function authMe(): Promise<MeResp> {
       authMeCache.at = Date.now();
       return v;
     })
-    .catch((e) => {
-      // If backend is transiently unavailable, treat as not logged in to avoid tight retry loops.
+    .catch(() => {
+      // 后端不可用时视为未登录，并 resolve（勿再 throw，否则 await authMe() 的页面会进 ErrorBoundary）
       authMeCache.value = { logged_in: false };
       authMeCache.at = Date.now();
-      throw e;
+      return { logged_in: false } as MeResp;
     })
     .finally(() => {
       authMeCache.inflight = null;
@@ -70,7 +47,7 @@ export async function authRegister(
 }
 
 export async function authLogout(): Promise<void> {
-  await fetch("/api/auth/logout", { method: "POST" });
+  await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
 }
 
 export async function authForgotPassword(email: string): Promise<{ ok: true }> {
@@ -88,6 +65,8 @@ export type Profile = {
   meta?: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  /** 越大在列表中越靠前（仅服务端排序用，可忽略） */
+  sort_index?: number;
 };
 
 export async function listProfiles(): Promise<{ profiles: Profile[] }> {
@@ -109,18 +88,15 @@ export async function updateProfile(
   profileId: number,
   patch: { name?: string; meta?: Record<string, unknown> }
 ): Promise<{ profile: Profile }> {
-  const res = await fetch(`/api/me/profiles/${profileId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return (await res.json()) as { profile: Profile };
+  return patchJson(`/api/me/profiles/${profileId}`, patch);
 }
 
 export async function deleteProfile(profileId: number): Promise<void> {
-  const res = await fetch(`/api/me/profiles/${profileId}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(await res.text());
+  await delJson(`/api/me/profiles/${profileId}`);
+}
+
+export async function reorderProfiles(ordered_ids: number[]): Promise<{ ok: boolean }> {
+  return postJson("/api/me/profiles/reorder", { ordered_ids });
 }
 
 export async function listChartsByProfile(
@@ -128,6 +104,18 @@ export async function listChartsByProfile(
   limit = 30
 ): Promise<{ charts: Array<{ chart_id: string; created_at: string; summary: string }> }> {
   return getJson(`/api/me/profiles/${profileId}/charts?limit=${encodeURIComponent(String(limit))}`);
+}
+
+/** 当前用户下全部命盘（按时间倒序），用于解梦等跨档案选择 */
+export async function listChartsByUser(
+  limit = 50
+): Promise<{ charts: Array<{ chart_id: string; created_at: string; summary: string }> }> {
+  return getJson(`/api/me/charts?limit=${encodeURIComponent(String(limit))}`);
+}
+
+/** 该档案在库中最近一次已存命盘（GET，不调用排盘计算） */
+export async function getLatestChartForProfile(profileId: number): Promise<{ chart: Record<string, unknown> }> {
+  return getJson(`/api/me/profiles/${encodeURIComponent(String(profileId))}/latest-chart`);
 }
 
 export type HepanListItem = { id: number; profile_name_a: string; profile_name_b: string; updated_at: string };
@@ -154,9 +142,7 @@ export async function getHepanReport(reportId: number): Promise<{ report: HepanR
 }
 
 export async function deleteHepanReport(reportId: number): Promise<{ ok: true }> {
-  const res = await fetch(`/api/hepan/${encodeURIComponent(String(reportId))}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(await res.text());
-  return (await res.json()) as { ok: true };
+  return delJson(`/api/hepan/${encodeURIComponent(String(reportId))}`);
 }
 
 export async function computeHepan(input: {
@@ -165,14 +151,6 @@ export async function computeHepan(input: {
   relation?: string;
   refresh?: boolean;
 }): Promise<{ report: HepanReport; from_cache?: boolean }> {
-  // Hepan may take 1-3 minutes (AI generation); give longer timeout.
-  const res = await fetchWithTimeout("/api/hepan/compute", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-    timeoutMs: 300_000,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return (await res.json()) as { report: HepanReport; from_cache?: boolean };
+  return postJson("/api/hepan/compute", input, { timeoutMs: 300_000 });
 }
 

@@ -1,24 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
+import { MascotBadge } from "../../components/MascotBadge";
+import { StatusBanner } from "../../components/ui/StatusBanner";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
 import { authMe } from "../../lib/authClient";
 import { StocksTopbar } from "./StocksTopbar";
 import { StocksScreenerPage } from "./StocksScreenerPage";
+import { StocksHotNewsPage } from "./StocksHotNewsPage";
 import { StocksTabs } from "./StocksTopbar";
 import {
   askStockAi,
   createStockAiAnalysis,
-  getKlines,
+  ensureSymbolMaster,
+  getIndicatorsCached,
+  getKlinesCached,
+  getRecentStockAiAnalysis,
   getStockAiAnalysis,
   getSymbolAnalysis,
+  getSymbolFundamentals,
+  searchSymbolsLocal,
+  streamAskStockAi,
+  streamCreateStockAiAnalysis,
   type StockAiAnswer,
   type StockAiSummary,
   type StockFundamentals,
   type StockSnapshot,
   type StrategySignal,
+  type IndicatorsPayload,
 } from "../../lib/stocksClient";
 import {
   CandlestickSeries,
@@ -32,6 +44,22 @@ import {
 type Freq = "1d" | "1w" | "1m";
 
 type SearchItem = { symbol: string; code: string; name: string; exchange: "SH" | "SZ" };
+
+function normalizeSymbolInput(raw: string) {
+  return String(raw || "")
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function normalizeSearchItem(raw: any): SearchItem | null {
+  const symbol = normalizeSymbolInput(raw?.symbol || raw?.ts_code || raw?.code || "");
+  if (!symbol) return null;
+  const code = String(raw?.code || symbol.slice(0, 6) || "").toUpperCase();
+  const exchange = String(raw?.exchange || (symbol.endsWith(".SH") ? "SH" : "SZ")).toUpperCase() as "SH" | "SZ";
+  const name = String(raw?.name || code || symbol);
+  return { symbol, code, name, exchange: exchange === "SH" ? "SH" : "SZ" };
+}
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -48,6 +76,20 @@ type KlineRow = {
 
 const DEFAULT_VISIBLE_BARS = 180;
 const ALL_MA_PERIODS = [5, 10, 20, 30, 60, 120, 250] as const;
+
+function visibleBarsRange(total: number, visibleBars: number | null, maPeriods: number[]): { from: number; to: number } | null {
+  if (total <= 0) return null;
+  if (visibleBars == null) return null;
+  const n = Math.max(20, Math.min(520, Math.floor(Number(visibleBars))));
+  const maxMa = Math.max(
+    5,
+    ...((maPeriods || [])
+      .map((x) => Math.floor(Number(x)))
+      .filter((x) => Number.isFinite(x) && x > 1) as number[])
+  );
+  const withWarmup = Math.min(900, n + maxMa);
+  return { from: Math.max(0, total - withWarmup), to: total - 1 };
+}
 
 function toUtcTimestampSec(ymd8: string) {
   const s = String(ymd8 || "");
@@ -196,10 +238,23 @@ function bindChartAutoResize(chart: IChartApi, el: HTMLElement) {
     }
   };
   apply();
+  // Defensive: on first mount some browsers/layouts miss ResizeObserver when starting from 0x0.
+  // Retry a few times to ensure the chart gets a non-zero resize and paints without requiring refresh.
+  let tries = 0;
+  const retry = window.setInterval(() => {
+    tries += 1;
+    try {
+      apply();
+    } catch {
+      // ignore
+    }
+    if (tries >= 10) window.clearInterval(retry);
+  }, 120);
   const ro = new ResizeObserver(() => apply());
   ro.observe(el);
   window.addEventListener("resize", apply, { passive: true });
   return () => {
+    window.clearInterval(retry);
     window.removeEventListener("resize", apply);
     ro.disconnect();
   };
@@ -250,6 +305,7 @@ async function getJson<T>(url: string): Promise<T> {
 export function StocksPage() {
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
+  const debugCharts = (params.get("debug") || "").trim() === "1";
   const [helpOpen, setHelpOpen] = useState(false);
   const [q, setQ] = useState("");
   const [freq, setFreq] = useState<Freq>("1d");
@@ -267,10 +323,12 @@ export function StocksPage() {
   const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
   const [aiQuestion, setAiQuestion] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiPhase, setAiPhase] = useState<"cache" | "evidence" | "preview" | "llm" | null>(null);
   const aiChatScrollRef = useRef<HTMLDivElement | null>(null);
   const chartLegendScrollRef = useRef<HTMLDivElement | null>(null);
   const [klineErr, setKlineErr] = useState<string | null>(null);
   const [klines, setKlines] = useState<KlineRow[]>([]);
+  const [indicatorsRemote, setIndicatorsRemote] = useState<IndicatorsPayload | null>(null);
   const [snapshot, setSnapshot] = useState<StockSnapshot | null>(null);
   const [fundamentals, setFundamentals] = useState<StockFundamentals | null>(null);
   const [strategySignals, setStrategySignals] = useState<StrategySignal[]>([]);
@@ -288,6 +346,8 @@ export function StocksPage() {
   const [maPickerOpen, setMaPickerOpen] = useState(false);
   const barsPickerWrapRef = useRef<HTMLDivElement | null>(null);
   const maPickerWrapRef = useRef<HTMLDivElement | null>(null);
+  // Chart refs are mutable; use a version bump to re-run effects after charts are created.
+  const [chartsVersion, setChartsVersion] = useState(0);
   const [indicatorLegend, setIndicatorLegend] = useState<{
     date_ymd?: string;
     vol?: number | null;
@@ -302,6 +362,7 @@ export function StocksPage() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const chartKeyRef = useRef<string>("");
   const maSeriesRef = useRef<Record<number, any>>({});
   const bollUpperRef = useRef<any>(null);
   const bollMidRef = useRef<any>(null);
@@ -322,13 +383,53 @@ export function StocksPage() {
   const kdjCacheRef = useRef<{ k: Array<number | null>; d: Array<number | null>; j: Array<number | null> } | null>(null);
   const macdCacheRef = useRef<{ dif: Array<number | null>; dea: Array<number | null>; hist: Array<number | null> } | null>(null);
 
+  const [chartDiag, setChartDiag] = useState<{
+    t: number;
+    openCharts: boolean;
+    selectedSymbol: string;
+    chartReady: boolean;
+    candleReady: boolean;
+    volReady: boolean;
+    hostW: number;
+    hostH: number;
+    klinesLen: number;
+    klineErr: string | null;
+    lastSetDataAt: number | null;
+    lastFetchAt: number | null;
+    lastFetchOk: boolean | null;
+    lastFetchMsg: string;
+  } | null>(null);
+  const diagRef = useRef<{ lastSetDataAt: number | null; lastFetchAt: number | null; lastFetchOk: boolean | null; lastFetchMsg: string }>({
+    lastSetDataAt: null,
+    lastFetchAt: null,
+    lastFetchOk: null,
+    lastFetchMsg: "",
+  });
+
   const fmtPct = (v: any) => (v == null ? "未覆盖" : `${Number(v).toFixed(2)}%`);
   const fmtNum2 = (v: any) => (v == null ? "未覆盖" : Number(v).toFixed(2));
   const fmtYi = (v: any) => (v == null ? "未覆盖" : `${Number(v / 1e4).toFixed(2)} 亿`);
-  const riskValueClass = (isRisk: boolean) => (isRisk ? "text-red-700" : "text-[var(--text-strong)]");
+  const riskValueClass = (isRisk: boolean) => (isRisk ? "text-[var(--warning)]" : "text-[var(--text-strong)]");
 
   const canSuggest = suggestOpen && q.trim().length > 0 && items.length > 0;
-  const activeTab = params.get("tab") === "screener" ? "screener" : "single";
+  const tab = params.get("tab");
+  const activeTab = tab === "screener" ? "screener" : tab === "news" ? "news" : "single";
+  const selectedSymbol = normalizeSymbolInput(selected?.symbol || selected?.code || "");
+  // URL is the source of truth for navigation (e.g. from screener "查看").
+  const urlSymbol = normalizeSymbolInput(params.get("symbol") || "");
+  const symbolForCharts = urlSymbol || selectedSymbol;
+
+  // When switching from screener->single, chart DOM mounts after the effect phase of the previous tab.
+  // Force a post-mount bump so chart init/data effects re-run with non-null refs.
+  useEffect(() => {
+    if (activeTab !== "single") return;
+    const r1 = requestAnimationFrame(() => setChartsVersion((v) => v + 1));
+    const t = window.setTimeout(() => setChartsVersion((v) => v + 1), 120);
+    return () => {
+      cancelAnimationFrame(r1);
+      window.clearTimeout(t);
+    };
+  }, [activeTab]);
 
   const forceResizeCharts = () => {
     const mainEl = chartElRef.current;
@@ -350,6 +451,39 @@ export function StocksPage() {
       macdC.resize(Math.ceil(r.width || 0), Math.ceil(r.height || 0));
     }
   };
+
+  const snapshotDiag = () => {
+    if (!debugCharts) return;
+    const el = chartElRef.current;
+    const r = el ? el.getBoundingClientRect() : null;
+    const hostW = r ? Math.round(r.width || 0) : 0;
+    const hostH = r ? Math.round(r.height || 0) : 0;
+    setChartDiag({
+      t: Date.now(),
+      openCharts,
+      selectedSymbol,
+      chartReady: Boolean(chartRef.current),
+      candleReady: Boolean(candleRef.current),
+      volReady: Boolean(volRef.current),
+      hostW,
+      hostH,
+      klinesLen: klines.length,
+      klineErr,
+      lastSetDataAt: diagRef.current.lastSetDataAt,
+      lastFetchAt: diagRef.current.lastFetchAt,
+      lastFetchOk: diagRef.current.lastFetchOk,
+      lastFetchMsg: diagRef.current.lastFetchMsg || "",
+    });
+  };
+
+  useEffect(() => {
+    if (!debugCharts) return;
+    // Keep diag refreshed for quick feedback without console.
+    snapshotDiag();
+    const t = window.setInterval(() => snapshotDiag(), 350);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debugCharts, openCharts, selectedSymbol, klines.length, klineErr, chartsVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -380,7 +514,7 @@ export function StocksPage() {
   }, [nav]);
 
   useEffect(() => {
-    if (!selected) {
+    if (!selected || !selectedSymbol) {
       setSnapshot(null);
       setFundamentals(null);
       setStrategySignals([]);
@@ -388,10 +522,12 @@ export function StocksPage() {
       return;
     }
     let alive = true;
-    void getSymbolAnalysis(selected.symbol)
+    // analysis 与 fundamentals 并行：fundamentals 单独请求 fina_indicator，避免基本面慢查询拖累快照/信号渲染。
+    void getSymbolAnalysis(selectedSymbol)
       .then((r) => {
         if (!alive) return;
         setSnapshot(r.snapshot_json);
+        // analysis 仍带 fundamentals_json 作为兜底，但优先以独立请求结果为准（下方覆盖）。
         setFundamentals((r as any).fundamentals_json || null);
         setStrategySignals(r.signals || []);
         setKeyLevels(r.key_levels || []);
@@ -403,10 +539,19 @@ export function StocksPage() {
         setStrategySignals([]);
         setKeyLevels([]);
       });
+    void getSymbolFundamentals(selectedSymbol)
+      .then((r) => {
+        if (!alive) return;
+        // 仅在拿到独立结果时覆盖；analysis 兜底里的快照估值字段保留。
+        setFundamentals((prev) => ({ ...(prev || ({} as any)), ...(r.fundamentals_json || {}) }));
+      })
+      .catch(() => {
+        // 静默：analysis 内已带 fundamentals_json 作为兜底。
+      });
     return () => {
       alive = false;
     };
-  }, [selected]);
+  }, [selected, selectedSymbol]);
 
   useEffect(() => {
     // Default behavior: collapse charts when no symbol is selected.
@@ -417,6 +562,46 @@ export function StocksPage() {
     // Auto-expand charts once a symbol is selected.
     setOpenCharts(true);
   }, [selected]);
+
+  // Entry-point safety: when navigating from screener -> single via URL params,
+  // ensure charts are expanded even if selected is still being hydrated.
+  useEffect(() => {
+    if (activeTab !== "single") return;
+    if (!urlSymbol) return;
+    setOpenCharts(true);
+  }, [activeTab, urlSymbol]);
+
+  // 切换股票时自动恢复最近一次 AI 解读会话（URL 显式带 ?ai= 时跳过，由下一个 effect 处理）
+  useEffect(() => {
+    if (!selected || !selectedSymbol) {
+      setAiAnalysisId(null);
+      setAiSummary(null);
+      setAiMessages([]);
+      return;
+    }
+    if ((params.get("ai") || "").trim()) return;
+    let cancelled = false;
+    void getRecentStockAiAnalysis(selectedSymbol, { freq, withMessages: true })
+      .then((r) => {
+        if (cancelled) return;
+        if (r?.ai_analysis) {
+          setAiAnalysisId(r.ai_analysis.id);
+          setAiSummary(r.ai_analysis.response_json);
+          setAiMessages(r.messages || []);
+        } else {
+          setAiAnalysisId(null);
+          setAiSummary(null);
+          setAiMessages([]);
+        }
+      })
+      .catch(() => {
+        // ignore: 未登录/网络异常时静默；用户仍可手动触发生成
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, selectedSymbol, freq]);
 
   useEffect(() => {
     const raw = params.get("ai") || "";
@@ -440,7 +625,7 @@ export function StocksPage() {
     return () => {
       cancelled = true;
     };
-  }, [params]);
+  }, [params.toString()]);
 
   useEffect(() => {
     if (!openAi) return;
@@ -521,13 +706,14 @@ export function StocksPage() {
     if (sp.get("ai") === String(aiAnalysisId)) return;
     sp.set("ai", String(aiAnalysisId));
     setParams(sp, { replace: true });
-  }, [aiAnalysisId, params, setParams]);
+  }, [aiAnalysisId, params.toString(), setParams]);
 
   useEffect(() => {
     // Init chart when opened
     if (!openCharts) return;
     const el = chartElRef.current;
     if (!el) return;
+    const nextKey = `${symbolForCharts || "∅"}:${freq}`;
     // If DOM node changed (layout refactor), recreate chart to avoid binding to a detached element.
     if (chartRef.current && chartHostElRef.current !== el) {
       try {
@@ -542,10 +728,28 @@ export function StocksPage() {
       bollUpperRef.current = null;
       bollMidRef.current = null;
       bollLowerRef.current = null;
+      chartKeyRef.current = "";
+    }
+    // Defensive: on route transitions the component may stay mounted; force rebuild when key changes.
+    if (chartRef.current && chartKeyRef.current && chartKeyRef.current !== nextKey) {
+      try {
+        chartRef.current.remove();
+      } catch {
+        // ignore
+      }
+      chartRef.current = null;
+      candleRef.current = null;
+      volRef.current = null;
+      maSeriesRef.current = {};
+      bollUpperRef.current = null;
+      bollMidRef.current = null;
+      bollLowerRef.current = null;
+      chartHostElRef.current = null;
+      chartKeyRef.current = "";
     }
     if (chartRef.current) return;
     const chart = createChart(el, {
-      layout: { background: { color: "transparent" }, textColor: "#5b4c7a", attributionLogo: false },
+      layout: { background: { color: "transparent" }, textColor: "#57534e", attributionLogo: false },
       localization: {
         locale: "zh-CN",
         timeFormatter: (t: any) => {
@@ -553,9 +757,9 @@ export function StocksPage() {
           return sec == null ? "" : fmtYmd(sec);
         },
       },
-      grid: { vertLines: { color: "rgba(90,74,122,0.06)" }, horzLines: { color: "rgba(90,74,122,0.06)" } },
-      rightPriceScale: { borderColor: "rgba(186,160,225,0.28)" },
-      timeScale: { borderColor: "rgba(186,160,225,0.28)" },
+      grid: { vertLines: { color: "rgba(28,25,23,0.06)" }, horzLines: { color: "rgba(28,25,23,0.06)" } },
+      rightPriceScale: { borderColor: "rgba(28,25,23,0.10)" },
+      timeScale: { borderColor: "rgba(28,25,23,0.10)" },
       watermark: { visible: false },
     } as any);
     // Hard resize once at init (more reliable than autoSize on mobile Safari).
@@ -567,20 +771,20 @@ export function StocksPage() {
     }
     // lightweight-charts v5+: use addSeries() API
     const candlestick = chart.addSeries(CandlestickSeries, {
-      upColor: "#EF4444",
-      downColor: "#10B981",
-      wickUpColor: "#EF4444",
-      wickDownColor: "#10B981",
+      upColor: "#c2410c",
+      downColor: "#2f6b4d",
+      wickUpColor: "#c2410c",
+      wickDownColor: "#2f6b4d",
       borderVisible: false,
     });
     const maColors: Record<number, string> = {
-      5: "rgba(99,102,241,0.85)",
-      10: "rgba(245,158,11,0.85)",
-      20: "rgba(34,197,94,0.85)",
-      30: "rgba(14,165,233,0.85)",
-      60: "rgba(168,85,247,0.8)",
-      120: "rgba(236,72,153,0.8)",
-      250: "rgba(100,116,139,0.85)",
+      5: "rgba(201,162,39,0.95)",
+      10: "rgba(180,140,90,0.95)",
+      20: "rgba(77,124,79,0.9)",
+      30: "rgba(120,113,108,0.85)",
+      60: "rgba(40,50,60,0.85)",
+      120: "rgba(168,108,71,0.85)",
+      250: "rgba(75,85,99,0.85)",
     };
     const maMap: Record<number, any> = {};
     for (const p of ALL_MA_PERIODS) {
@@ -591,13 +795,13 @@ export function StocksPage() {
         lastValueVisible: false,
       });
     }
-    const bollUpper = chart.addSeries(LineSeries, { color: "rgba(236,72,153,0.75)", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
-    const bollMid = chart.addSeries(LineSeries, { color: "rgba(148,163,184,0.85)", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
-    const bollLower = chart.addSeries(LineSeries, { color: "rgba(236,72,153,0.75)", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+    const bollUpper = chart.addSeries(LineSeries, { color: "rgba(201,162,39,0.7)", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+    const bollMid = chart.addSeries(LineSeries, { color: "rgba(120,113,108,0.7)", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+    const bollLower = chart.addSeries(LineSeries, { color: "rgba(201,162,39,0.7)", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
     const vol = chart.addSeries(HistogramSeries, {
       priceScaleId: "",
       priceFormat: { type: "volume" },
-      color: "rgba(90,74,122,0.18)",
+      color: "rgba(28,25,23,0.18)",
     });
     chart.priceScale("").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     chartRef.current = chart;
@@ -608,6 +812,9 @@ export function StocksPage() {
     bollUpperRef.current = bollUpper;
     bollMidRef.current = bollMid;
     bollLowerRef.current = bollLower;
+    chartKeyRef.current = nextKey;
+    // Trigger downstream data/sync effects once refs are ready (without depending on chartsVersion here).
+    setChartsVersion((v) => v + 1);
     const unbind = bindChartAutoResize(chart, el);
 
     return () => {
@@ -621,8 +828,9 @@ export function StocksPage() {
       bollLowerRef.current = null;
       chartRef.current?.remove();
       chartRef.current = null;
+      chartKeyRef.current = "";
     };
-  }, [openCharts]);
+  }, [openCharts, symbolForCharts, freq]);
 
   useEffect(() => {
     if (!openCharts || !showKdj) {
@@ -656,10 +864,10 @@ export function StocksPage() {
     }
     if (kdjChartRef.current) return;
     const chart = createChart(el, {
-      layout: { background: { color: "transparent" }, textColor: "#5b4c7a", attributionLogo: false },
-      grid: { vertLines: { color: "rgba(90,74,122,0.06)" }, horzLines: { color: "rgba(90,74,122,0.06)" } },
-      rightPriceScale: { borderColor: "rgba(186,160,225,0.28)" },
-      timeScale: { borderColor: "rgba(186,160,225,0.28)" },
+      layout: { background: { color: "transparent" }, textColor: "#57534e", attributionLogo: false },
+      grid: { vertLines: { color: "rgba(28,25,23,0.06)" }, horzLines: { color: "rgba(28,25,23,0.06)" } },
+      rightPriceScale: { borderColor: "rgba(28,25,23,0.10)" },
+      timeScale: { borderColor: "rgba(28,25,23,0.10)" },
       crosshair: { mode: 0 },
       watermark: { visible: false },
     } as any);
@@ -670,14 +878,16 @@ export function StocksPage() {
       // ignore
     }
     chart.timeScale().applyOptions({ visible: false });
-    const kLine = chart.addSeries(LineSeries, { color: "rgba(245,158,11,0.9)", lineWidth: 2 });
-    const dLine = chart.addSeries(LineSeries, { color: "rgba(99,102,241,0.9)", lineWidth: 2 });
-    const jLine = chart.addSeries(LineSeries, { color: "rgba(236,72,153,0.75)", lineWidth: 1 });
+    const kLine = chart.addSeries(LineSeries, { color: "rgba(201,162,39,0.95)", lineWidth: 2 });
+    const dLine = chart.addSeries(LineSeries, { color: "rgba(120,113,108,0.95)", lineWidth: 2 });
+    const jLine = chart.addSeries(LineSeries, { color: "rgba(168,108,71,0.85)", lineWidth: 1 });
     kdjChartRef.current = chart;
     kdjHostElRef.current = el;
     kdjKRef.current = kLine;
     kdjDRef.current = dLine;
     kdjJRef.current = jLine;
+    // Trigger downstream data/sync effects once refs are ready (without depending on chartsVersion here).
+    setChartsVersion((v) => v + 1);
     const unbind = bindChartAutoResize(chart, el);
     return () => {
       unbind();
@@ -721,10 +931,10 @@ export function StocksPage() {
     }
     if (macdChartRef.current) return;
     const chart = createChart(el, {
-      layout: { background: { color: "transparent" }, textColor: "#5b4c7a", attributionLogo: false },
-      grid: { vertLines: { color: "rgba(90,74,122,0.06)" }, horzLines: { color: "rgba(90,74,122,0.06)" } },
-      rightPriceScale: { borderColor: "rgba(186,160,225,0.28)" },
-      timeScale: { borderColor: "rgba(186,160,225,0.28)" },
+      layout: { background: { color: "transparent" }, textColor: "#57534e", attributionLogo: false },
+      grid: { vertLines: { color: "rgba(28,25,23,0.06)" }, horzLines: { color: "rgba(28,25,23,0.06)" } },
+      rightPriceScale: { borderColor: "rgba(28,25,23,0.10)" },
+      timeScale: { borderColor: "rgba(28,25,23,0.10)" },
       crosshair: { mode: 0 },
       watermark: { visible: false },
     } as any);
@@ -737,13 +947,15 @@ export function StocksPage() {
     chart.timeScale().applyOptions({ visible: true });
     const hist = chart.addSeries(HistogramSeries, { priceScaleId: "", priceFormat: { type: "price", precision: 2, minMove: 0.01 } });
     chart.priceScale("").applyOptions({ scaleMargins: { top: 0.2, bottom: 0.2 } });
-    const dif = chart.addSeries(LineSeries, { color: "rgba(34,197,94,0.9)", lineWidth: 2 });
-    const dea = chart.addSeries(LineSeries, { color: "rgba(239,68,68,0.9)", lineWidth: 2 });
+    const dif = chart.addSeries(LineSeries, { color: "rgba(77,124,79,0.95)", lineWidth: 2 });
+    const dea = chart.addSeries(LineSeries, { color: "rgba(194,65,12,0.95)", lineWidth: 2 });
     macdChartRef.current = chart;
     macdHostElRef.current = el;
     macdHistRef.current = hist;
     macdDifRef.current = dif;
     macdDeaRef.current = dea;
+    // Trigger downstream data/sync effects once refs are ready (without depending on chartsVersion here).
+    setChartsVersion((v) => v + 1);
     const unbind = bindChartAutoResize(chart, el);
     return () => {
       unbind();
@@ -817,18 +1029,31 @@ export function StocksPage() {
       kdjC.timeScale().unsubscribeVisibleTimeRangeChange(onKdjRange);
       macdC.timeScale().unsubscribeVisibleTimeRangeChange(onMacdRange);
     };
-  }, [openCharts, showKdj, showMacd]);
+  }, [openCharts, showKdj, showMacd, chartsVersion]);
 
   useEffect(() => {
     const chartApi = chartRef.current;
     const candleSeries = candleRef.current;
     const volSeries = volRef.current;
-    if (!openCharts || !selected || !chartApi || !candleSeries || !volSeries) return;
+    if (!openCharts || !symbolForCharts || !chartApi || !candleSeries || !volSeries) return;
     const to = todayIso();
-    const from = new Date(Date.now() - 365 * 3 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const from = new Date(Date.now() - 365 * 6 * 24 * 3600 * 1000).toISOString().slice(0, 10);
     setKlineErr(null);
-    void getKlines({ symbol: selected.symbol, from, to, freq, adjust: "none" })
+    if (!symbolForCharts) {
+      setKlineErr("请先选择股票代码");
+      return;
+    }
+    setIndicatorsRemote(null);
+    void getIndicatorsCached({ symbol: symbolForCharts, from, to, freq })
+      .then((p) => setIndicatorsRemote(p))
+      .catch(() => setIndicatorsRemote(null));
+    diagRef.current.lastFetchAt = Date.now();
+    diagRef.current.lastFetchOk = null;
+    diagRef.current.lastFetchMsg = `fetch klines ${symbolForCharts} ${from}~${to} ${freq}`;
+    void getKlinesCached({ symbol: symbolForCharts, from, to, freq, adjust: "none" })
       .then((r) => {
+        diagRef.current.lastFetchOk = true;
+        diagRef.current.lastFetchMsg = `ok klines=${(r.candles || []).length} cache=${(r as any).cache || ""}`;
         const fail = (step: string, e: any) => {
           throw new Error(`[chart:${step}] ${String(e?.message || e)}`);
         };
@@ -918,6 +1143,7 @@ export function StocksPage() {
         } catch (e: any) {
           fail("volume_setData", e);
         }
+        diagRef.current.lastSetDataAt = Date.now();
 
         // Keep indicator computations aligned to chart data (deduped).
         setKlines(
@@ -931,36 +1157,105 @@ export function StocksPage() {
           })) as any
         );
 
-        // Default view: show recent N bars (logical range).
+        // Paint safety: after setData, force a couple resizes on next frames,
+        // then apply timeScale range (some browsers have a race where early range makes chart blank).
         try {
-          const last = data.length;
-          if (last > 0) {
-            if (visibleBars == null) {
-              chartApi.timeScale().fitContent();
-            } else {
-              const n = Math.max(30, Math.min(520, Math.floor(visibleBars)));
-              const from0 = Math.max(0, last - n);
-              chartApi.timeScale().setVisibleLogicalRange({ from: from0, to: last - 1 });
+          requestAnimationFrame(() => {
+            try {
+              forceResizeCharts();
+              requestAnimationFrame(() => {
+                try {
+                  forceResizeCharts();
+                  // Default view: show recent N bars (logical range).
+                  try {
+                    const last = data.length;
+                    if (last > 0) {
+                      if (visibleBars == null) {
+                        chartApi.timeScale().fitContent();
+                      } else {
+                        const range = visibleBarsRange(last, visibleBars, maPeriods);
+                        if (range) chartApi.timeScale().setVisibleLogicalRange(range);
+                        else chartApi.timeScale().fitContent();
+                      }
+                    } else {
+                      chartApi.timeScale().fitContent();
+                    }
+                  } catch (e: any) {
+                    fail("main_visibleRange", e);
+                  }
+                  // Extra delayed tick（布局稳定）；勿无条件 fitContent，否则会冲掉「最近 N 根」视窗，均线在屏上像被截断。
+                  window.setTimeout(() => {
+                    try {
+                      forceResizeCharts();
+                      const lastN = data.length;
+                      if (lastN <= 0) return;
+                      if (visibleBars == null) {
+                        chartApi.timeScale().fitContent();
+                      } else {
+                        const range = visibleBarsRange(lastN, visibleBars, maPeriods);
+                        if (range) chartApi.timeScale().setVisibleLogicalRange(range);
+                        else chartApi.timeScale().fitContent();
+                      }
+                    } catch {
+                      // ignore
+                    }
+                  }, 300);
+                } catch {
+                  // ignore
+                }
+              });
+            } catch {
+              // ignore
             }
-          } else {
-            chartApi.timeScale().fitContent();
-          }
-        } catch (e: any) {
-          fail("main_visibleRange", e);
+          });
+        } catch {
+          // ignore
         }
       })
       .catch((e: any) => {
+        diagRef.current.lastFetchOk = false;
+        diagRef.current.lastFetchMsg = `fail ${String(e?.message || e)}`.slice(0, 240);
         setKlineErr(String(e?.message || e));
       });
-  }, [openCharts, selected, freq, visibleBars]);
+  }, [openCharts, symbolForCharts, freq, visibleBars, maPeriods, chartsVersion]);
 
   useEffect(() => {
     if (!openCharts || !klines.length) return;
     const times = klines.map((c) => toUtcTimestampSec(c.t));
     const closes = klines.map((c) => c.close);
     const rows = klines.map((c) => ({ high: c.high, low: c.low, close: c.close }));
-    const kdjOut = kdj(rows);
-    const macdOut = macd(closes);
+    // 优先使用后端预算指标；按 times 对齐后回退到本地算子。
+    const remote = indicatorsRemote && indicatorsRemote.freq === freq && indicatorsRemote.times?.length ? indicatorsRemote : null;
+    const remoteIdxByTime = remote
+      ? (() => {
+          const m = new Map<string, number>();
+          remote.times.forEach((t, i) => m.set(String(t), i));
+          return m;
+        })()
+      : null;
+    const pickRemote = (arr: Array<number | null> | undefined) => {
+      if (!arr || !remoteIdxByTime) return null;
+      return klines.map((c) => {
+        const idx = remoteIdxByTime.get(String(c.t));
+        return idx == null ? null : arr[idx] ?? null;
+      });
+    };
+    const kdjLocal = kdj(rows);
+    const macdLocal = macd(closes);
+    const kdjOut = remote
+      ? {
+          k: pickRemote(remote.kdj?.k) ?? kdjLocal.k,
+          d: pickRemote(remote.kdj?.d) ?? kdjLocal.d,
+          j: pickRemote(remote.kdj?.j) ?? kdjLocal.j,
+        }
+      : kdjLocal;
+    const macdOut = remote
+      ? {
+          dif: pickRemote(remote.macd?.dif) ?? macdLocal.dif,
+          dea: pickRemote(remote.macd?.dea) ?? macdLocal.dea,
+          hist: pickRemote(remote.macd?.hist) ?? macdLocal.hist,
+        }
+      : macdLocal;
     kdjCacheRef.current = kdjOut;
     macdCacheRef.current = macdOut;
 
@@ -1024,7 +1319,7 @@ export function StocksPage() {
       kdj: { j: kdjOut.j[lastIdx] ?? null },
       macd: { dif: macdOut.dif[lastIdx] ?? null },
     });
-  }, [openCharts, klines, showKdj, showMacd]);
+  }, [openCharts, klines, showKdj, showMacd, indicatorsRemote, freq]);
 
   useEffect(() => {
     if (!openCharts) return;
@@ -1063,7 +1358,37 @@ export function StocksPage() {
     const times = klines.map((c) => toUtcTimestampSec(c.t));
     const closes = klines.map((c) => c.close);
     const selected = new Set<number>((maPeriods || []).map((x) => Math.floor(Number(x))).filter((x) => Number.isFinite(x) && x > 1));
-    const boll = bollinger(closes, 20, 2);
+    const remote = indicatorsRemote && indicatorsRemote.freq === freq && indicatorsRemote.times?.length ? indicatorsRemote : null;
+    const remoteIdxByTime = remote
+      ? (() => {
+          const m = new Map<string, number>();
+          remote.times.forEach((t, i) => m.set(String(t), i));
+          return m;
+        })()
+      : null;
+    const pickRemote = (arr: Array<number | null> | undefined): Array<number | null> | null => {
+      if (!arr || !remoteIdxByTime) return null;
+      return klines.map((c) => {
+        const idx = remoteIdxByTime.get(String(c.t));
+        return idx == null ? null : arr[idx] ?? null;
+      });
+    };
+    /** 远端按日对齐若有空洞，用本地同索引值补上，避免 MA 线「断一截」。 */
+    const mergeRemoteWithLocal = (local: Array<number | null>, remoteRow: Array<number | null> | null): Array<number | null> => {
+      if (!remoteRow) return local;
+      return local.map((lv, i) => {
+        const rv = remoteRow[i];
+        return rv != null && Number.isFinite(Number(rv)) ? Number(rv) : lv;
+      });
+    };
+    const bollLocal = bollinger(closes, 20, 2);
+    const boll = remote
+      ? {
+          up: pickRemote(remote.bollinger?.up) ?? bollLocal.up,
+          mid: pickRemote(remote.bollinger?.mid) ?? bollLocal.mid,
+          low: pickRemote(remote.bollinger?.low) ?? bollLocal.low,
+        }
+      : bollLocal;
 
     const maMap = maSeriesRef.current || {};
     for (const p of ALL_MA_PERIODS) {
@@ -1073,7 +1398,9 @@ export function StocksPage() {
         s.setData([] as any);
         continue;
       }
-      const out = smaN(closes, p);
+      const localMa = smaN(closes, p);
+      const remoteMa = remote ? pickRemote(remote.ma?.[String(p)]) : null;
+      const out = mergeRemoteWithLocal(localMa, remoteMa);
       s.setData(times.map((t, i) => (t == null || out[i] == null ? null : { time: t, value: round2(out[i]!) })).filter(Boolean) as any);
     }
     const upper = bollUpperRef.current;
@@ -1082,7 +1409,7 @@ export function StocksPage() {
     if (upper) upper.setData(showBoll ? (times.map((t, i) => (t == null || boll.up[i] == null ? null : { time: t, value: round2(boll.up[i]!) })).filter(Boolean) as any) : ([] as any));
     if (mid) mid.setData(showBoll ? (times.map((t, i) => (t == null || boll.mid[i] == null ? null : { time: t, value: round2(boll.mid[i]!) })).filter(Boolean) as any) : ([] as any));
     if (lower) lower.setData(showBoll ? (times.map((t, i) => (t == null || boll.low[i] == null ? null : { time: t, value: round2(boll.low[i]!) })).filter(Boolean) as any) : ([] as any));
-  }, [openCharts, klines, maPeriods, showBoll]);
+  }, [openCharts, klines, maPeriods, showBoll, indicatorsRemote, freq]);
 
   useEffect(() => {
     if (!openCharts) return;
@@ -1116,6 +1443,34 @@ export function StocksPage() {
   }, [barsPickerOpen]);
 
   useEffect(() => {
+    const sym = (params.get("symbol") || "").trim();
+    // 允许在同一页面内通过 Link 切换 symbol（组件不卸载），因此需监听 URL 参数变化。
+    const symNorm = normalizeSymbolInput(sym);
+    if (symNorm) {
+      setQ((prev) => (normalizeSymbolInput(prev) === symNorm ? prev : symNorm));
+    }
+    // URL 是导航真源（策略选股“查看”会直接带 symbol）。为避免等待搜索防抖导致图表/行情不触发，
+    // 这里先用 URL symbol 写入 selected（占位），后续搜索命中后再用更完整的 name/exchange 覆盖。
+    if (symNorm) {
+      setSelected((prev) => {
+        const cur = normalizeSymbolInput((prev as any)?.symbol || "");
+        if (cur === symNorm) return prev;
+        const code = symNorm.slice(0, 6);
+        const exchange = symNorm.endsWith(".SH") ? "SH" : "SZ";
+        return { symbol: symNorm, code, name: symNorm, exchange } as any;
+      });
+    }
+    // 当 URL 去掉 symbol 时，不强制清空 q（保留用户手动输入）。
+  }, [params.toString()]); // depend on stable search string to avoid effect loop
+
+  useEffect(() => {
+    // 预热 symbol master 本地缓存（首屏不阻塞渲染）
+    void ensureSymbolMaster().catch(() => {
+      // 缺失时退化为服务端搜索
+    });
+  }, []);
+
+  useEffect(() => {
     let alive = true;
     const run = async () => {
       const qq = q.trim();
@@ -1125,11 +1480,27 @@ export function StocksPage() {
         setSelected(null);
         return;
       }
+      // 优先本地匹配
+      try {
+        const master = await ensureSymbolMaster();
+        if (!alive) return;
+        const local = searchSymbolsLocal(master, qq, 20).map(normalizeSearchItem).filter(Boolean) as SearchItem[];
+        if (local.length) {
+          setItems(local);
+          const qNorm = qq.replace(/\s+/g, "").toUpperCase();
+          const best =
+            local.find((it) => String(it.symbol || "").toUpperCase() === qNorm || String(it.code || "").toUpperCase() === qNorm) || local[0];
+          if (!best?.symbol) setSelected(null);
+          else setSelected(best);
+          return;
+        }
+      } catch {
+        // ignore，fallback 服务端
+      }
       try {
         const r = await getJson<{ items: SearchItem[] }>(`/api/symbols/search?q=${encodeURIComponent(qq)}&limit=20`);
         if (!alive) return;
-        // Single-select only: keep suggestions, auto-pick best match.
-        const list = (r.items || []) as SearchItem[];
+        const list = (r.items || []).map(normalizeSearchItem).filter(Boolean) as SearchItem[];
         setItems(list);
         if (list.length === 0) {
           setSelected(null);
@@ -1137,7 +1508,8 @@ export function StocksPage() {
           const qNorm = qq.replace(/\s+/g, "").toUpperCase();
           const best =
             list.find((it) => String(it.symbol || "").toUpperCase() === qNorm || String(it.code || "").toUpperCase() === qNorm) || list[0];
-          setSelected(best);
+          if (!best?.symbol) setSelected(null);
+          else setSelected(best);
         }
       } catch (e: any) {
         if (!alive) return;
@@ -1149,7 +1521,7 @@ export function StocksPage() {
         setErr(msg);
       }
     };
-    const t = window.setTimeout(run, 250);
+    const t = window.setTimeout(run, 120);
     return () => {
       alive = false;
       window.clearTimeout(t);
@@ -1157,24 +1529,50 @@ export function StocksPage() {
   }, [q]); // intentionally not depending on selected
 
   const onGenerateAi = async () => {
-    if (!selected) return;
+    if (!selected || !selectedSymbol) {
+      setErr("请先选择有效股票代码");
+      return;
+    }
     setLoading(true);
     setErr(null);
+    setAiPhase("evidence");
     try {
-      const r = await createStockAiAnalysis(selected.symbol, { asof: "today", freq });
+      const r = await streamCreateStockAiAnalysis(
+        selectedSymbol,
+        { asof: "today", freq },
+        {
+          onPhase: (p) => setAiPhase(p),
+          onPreview: () => {
+            // 证据已就绪，UI 可以先把"正在生成解读…"提示亮出
+            setOpenAi(true);
+          },
+        }
+      );
       setAiAnalysisId(r.ai_analysis_id);
       setAiSummary(r.summary);
       setOpenAi(true);
-      // Persist the session id to URL so refresh won't lose it.
       const sp = new URLSearchParams(params);
       sp.set("ai", String(r.ai_analysis_id));
       setParams(sp, { replace: true });
-      // After server-side change, initial assistant message is persisted; fetch to ensure consistency.
       void getStockAiAnalysis(r.ai_analysis_id).then((out) => setAiMessages(out.messages || []));
       setAiQuestion("");
     } catch (e: any) {
-      setErr(String(e?.message || e));
+      // 流式失败回退一次性接口
+      try {
+        const r = await createStockAiAnalysis(selectedSymbol, { asof: "today", freq });
+        setAiAnalysisId(r.ai_analysis_id);
+        setAiSummary(r.summary);
+        setOpenAi(true);
+        const sp = new URLSearchParams(params);
+        sp.set("ai", String(r.ai_analysis_id));
+        setParams(sp, { replace: true });
+        void getStockAiAnalysis(r.ai_analysis_id).then((out) => setAiMessages(out.messages || []));
+        setAiQuestion("");
+      } catch (e2: any) {
+        setErr(String(e2?.message || e2 || e?.message || e));
+      }
     } finally {
+      setAiPhase(null);
       setLoading(false);
     }
   };
@@ -1186,14 +1584,47 @@ export function StocksPage() {
     setAiBusy(true);
     setErr(null);
     setAiQuestion("");
-    setAiMessages((m) => [...m, { role: "user", content: qq }]);
+    // 先把用户问题与一条空的 assistant 占位写入，流式 delta 直接追加到最后一条 assistant。
+    setAiMessages((m) => [...m, { role: "user", content: qq }, { role: "assistant", content: "" }]);
     try {
-      const r = await askStockAi(aiAnalysisId, qq);
-      const a: StockAiAnswer = r.answer;
-      setAiMessages((m) => [...m, { role: "assistant", content: a.text }]);
+      await streamAskStockAi(aiAnalysisId, qq, {
+        onDelta: (d) => {
+          setAiMessages((m) => {
+            const next = m.slice();
+            const last = next[next.length - 1];
+            if (last && last.role === "assistant") {
+              next[next.length - 1] = { role: "assistant", content: (last.content || "") + d };
+            }
+            return next;
+          });
+        },
+      });
     } catch (e: any) {
-      setErr(String(e?.message || e));
-      setAiMessages((m) => [...m, { role: "assistant", content: "追问失败，请稍后重试。" }]);
+      // 流式失败回退到一次性接口，保证体验不退化。
+      try {
+        const r = await askStockAi(aiAnalysisId, qq);
+        const a: StockAiAnswer = r.answer;
+        setAiMessages((m) => {
+          const next = m.slice();
+          if (next.length && next[next.length - 1].role === "assistant" && !next[next.length - 1].content) {
+            next[next.length - 1] = { role: "assistant", content: a.text };
+          } else {
+            next.push({ role: "assistant", content: a.text });
+          }
+          return next;
+        });
+      } catch (e2: any) {
+        setErr(String(e2?.message || e2 || e?.message || e));
+        setAiMessages((m) => {
+          const next = m.slice();
+          if (next.length && next[next.length - 1].role === "assistant" && !next[next.length - 1].content) {
+            next[next.length - 1] = { role: "assistant", content: "追问失败，请稍后重试。" };
+          } else {
+            next.push({ role: "assistant", content: "追问失败，请稍后重试。" });
+          }
+          return next;
+        });
+      }
     } finally {
       setAiBusy(false);
     }
@@ -1206,26 +1637,47 @@ export function StocksPage() {
       <header className="home-landing-header" aria-labelledby="stocks-page-title">
         <div className="home-landing-header-content">
           <h1 id="stocks-page-title" className="home-landing-title">
-            {activeTab === "screener" ? "资研参详·策略选股" : "资研参详·单股研判"}
+            {activeTab === "screener" ? "资研参详·策略选股" : activeTab === "news" ? "资研参详·热点新闻" : "资研参详·单股研判"}
           </h1>
           <p className="home-landing-subline mt-2">
-            {activeTab === "screener" ? "一键运行 · 运行历史 · TopN与理由" : "搜索 · 日/周/月 · 成交量/KDJ/MACD"}
+            {activeTab === "screener"
+              ? "一键运行 · 运行历史 · TopN与理由"
+              : activeTab === "news"
+                ? "市场热点 · 行业标签 · 情绪标注"
+                : "搜索 · 日/周/月 · 成交量/KDJ/MACD"}
           </p>
         </div>
-        <Link to="/" className="home-landing-mascot shrink-0" aria-label="返回首页">
-          <div className="home-landing-mascot-icon" aria-hidden />
-          <div className="home-landing-mascot-text">可可爱爱小馆灵</div>
-        </Link>
+        <MascotBadge to="/" label="返回首页" />
       </header>
 
-      <StocksTabs />
-
       <div className="home-landing-surface max-w-full overflow-x-hidden p-5">
+        <StocksTabs />
         {activeTab === "screener" ? (
           <StocksScreenerPage />
+        ) : activeTab === "news" ? (
+          <StocksHotNewsPage />
         ) : (
           <>
-        {err ? <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div> : null}
+        {err ? <StatusBanner tone="danger" role="alert" dismissible onDismiss={() => setErr(null)} className="mt-3">{err}</StatusBanner> : null}
+        {debugCharts && chartDiag ? (
+          <div className="mt-3 rounded-xl border border-[rgba(148,163,184,0.35)] bg-white/50 p-3 text-xs text-[var(--text-muted)]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-semibold text-[var(--text-strong)]">Chart Debug</div>
+              <div className="tabular-nums">{new Date(chartDiag.t).toLocaleTimeString("zh-CN")}</div>
+            </div>
+            <div className="mt-2 grid gap-1">
+              <div>
+                openCharts={String(chartDiag.openCharts)}; selected={chartDiag.selectedSymbol || "∅"}; host={chartDiag.hostW}×{chartDiag.hostH}
+              </div>
+              <div>
+                ready: chart={String(chartDiag.chartReady)} candle={String(chartDiag.candleReady)} vol={String(chartDiag.volReady)}; klines={chartDiag.klinesLen}
+              </div>
+              <div>fetch: {chartDiag.lastFetchOk === null ? "…" : chartDiag.lastFetchOk ? "ok" : "fail"}; msg={chartDiag.lastFetchMsg}</div>
+              <div>lastSetDataAt={chartDiag.lastSetDataAt ? new Date(chartDiag.lastSetDataAt).toLocaleTimeString("zh-CN") : "—"}</div>
+              {chartDiag.klineErr ? <div className="text-[var(--danger)]">klineErr: {chartDiag.klineErr}</div> : null}
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-4 grid min-w-0 max-w-full items-start gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
           {/* Left: search/results + analysis + AI */}
@@ -1235,7 +1687,7 @@ export function StocksPage() {
                 <label className="block">
                   <div className="text-xs font-semibold tracking-[0.14em] text-[var(--text-muted)]">股票代码/简称</div>
                   <div className="relative">
-                    <input
+                    <Input
                       value={q}
                       onChange={(e) => setQ(e.target.value)}
                       onFocus={() => {
@@ -1248,7 +1700,7 @@ export function StocksPage() {
                       }}
                       placeholder="例如：600519 或 000001"
                       disabled={busy}
-                      className="mt-1 block h-10 w-full min-w-0 max-w-full rounded-xl border border-[var(--border-main)] bg-white/40 px-3 text-sm text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
+                      className="mt-1"
                     />
 
                     {canSuggest ? (
@@ -1264,8 +1716,10 @@ export function StocksPage() {
                               ].join(" ")}
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => {
-                                setSelected(it);
-                                setQ(it.symbol || it.code || "");
+                                const sym = normalizeSymbolInput(it.symbol || it.code || "");
+                                if (!sym) return;
+                                setSelected({ ...it, symbol: sym });
+                                setQ(sym);
                                 setSuggestOpen(false);
                               }}
                             >
@@ -1475,11 +1929,18 @@ export function StocksPage() {
                   ) : null}
                   <div className="mt-4 flex flex-wrap gap-2">
                     <Button type="button" disabled={!selected || loading} onClick={onGenerateAi}>
-                      {loading ? "生成中..." : "AI解读（生成一次）"}
+                      {loading
+                        ? aiPhase === "cache"
+                          ? "命中缓存..."
+                          : aiPhase === "evidence"
+                            ? "抓取行情..."
+                            : aiPhase === "preview"
+                              ? "证据就绪..."
+                              : aiPhase === "llm"
+                                ? "AI 解读中..."
+                                : "生成中..."
+                        : "AI解读（生成一次）"}
                     </Button>
-                  </div>
-                  <div className="mt-4 text-xs text-[var(--text-muted)]">
-                    这里会逐步补齐：行业(申万一/二级)、涨跌幅、PE(TTM)、策略信号与 reasons_json。
                   </div>
                 </div>
               ) : null}
@@ -1615,11 +2076,11 @@ export function StocksPage() {
 
                         <div className="border-t border-[var(--border-soft)] p-3">
                           <div className="flex gap-2">
-                            <input
+                            <Input
                               value={aiQuestion}
                               onChange={(e) => setAiQuestion(e.target.value)}
                               placeholder="例如：今天更偏向哪种策略？关键止损价位怎么看？"
-                              className="h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                              className="flex-1"
                               disabled={aiBusy}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") void onAskAi();
@@ -1672,15 +2133,18 @@ export function StocksPage() {
               {openCharts ? (
                 <div>
                   {klineErr ? (
-                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{klineErr}</div>
+                    <StatusBanner tone="danger" role="alert" dismissible onDismiss={() => setKlineErr(null)} className="mt-3">{klineErr}</StatusBanner>
                   ) : null}
-                  <div className="relative mt-3 overflow-hidden rounded-xl border border-[var(--border-soft)] bg-white/30">
-                    <div
-                      ref={chartElRef}
-                      className="relative h-[360px] w-full sm:h-[320px]"
-                    />
-                    <div className="pointer-events-none absolute left-0 top-0 z-10 p-2">
-                      <div className="pointer-events-auto w-full max-w-full overflow-x-auto rounded-lg border border-[var(--border-soft)] bg-white/60 px-2 py-1 shadow-sm backdrop-blur">
+                  {/* 外层勿 overflow-hidden：会裁掉 MA / K 线根数 等 absolute 下拉面板 */}
+                  <div className="relative mt-3 overflow-visible rounded-xl border border-[var(--border-soft)] bg-white/30">
+                    <div className="overflow-hidden rounded-xl">
+                      <div
+                        ref={chartElRef}
+                        className="relative h-[360px] w-full sm:h-[320px]"
+                      />
+                    </div>
+                    <div className="pointer-events-none absolute left-0 top-0 z-40 p-2">
+                      <div className="pointer-events-auto w-full max-w-full overflow-visible rounded-lg border border-[var(--border-soft)] bg-white/60 px-2 py-1 shadow-sm backdrop-blur">
                         <div className="max-w-full">
                           <div className="flex flex-nowrap items-center gap-1 whitespace-nowrap">
                           {[
@@ -1700,7 +2164,6 @@ export function StocksPage() {
                                     : "border-[var(--border-soft)] bg-white/35 text-[var(--text-muted)] hover:bg-white/55",
                                 ].join(" ")}
                                 onClick={() => setFreq(opt.v)}
-                                disabled={busy}
                               >
                                 {opt.label}
                               </button>
@@ -1715,13 +2178,12 @@ export function StocksPage() {
                                 "border-[var(--border-soft)] bg-white/35 text-[var(--text-muted)] hover:bg-white/55",
                               ].join(" ")}
                               onClick={() => setBarsPickerOpen((v) => !v)}
-                              disabled={busy}
                               title="选择最近多少根K线"
                             >
                               {visibleBars == null ? "全部" : `${visibleBars}`}
                             </button>
                             {barsPickerOpen ? (
-                              <div className="absolute left-0 top-full z-20 mt-1 w-[220px] max-w-[calc(100vw-3rem)] rounded-lg border border-[var(--border-soft)] bg-white/90 p-2 shadow-lg backdrop-blur">
+                              <div className="absolute left-0 top-full z-50 mt-1 w-[220px] max-w-[calc(100vw-3rem)] rounded-lg border border-[var(--border-soft)] bg-white/90 p-2 shadow-lg backdrop-blur">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   {[60, 120, 180, 250].map((n) => {
                                     const active = visibleBars === n;
@@ -1740,7 +2202,6 @@ export function StocksPage() {
                                           setVisibleBars(n);
                                           setBarsPickerOpen(false);
                                         }}
-                                        disabled={busy}
                                         title={`最近 ${n} 根K线`}
                                       >
                                         {n}
@@ -1760,7 +2221,6 @@ export function StocksPage() {
                                       setVisibleBars(null);
                                       setBarsPickerOpen(false);
                                     }}
-                                    disabled={busy}
                                     title="显示全量数据"
                                   >
                                     全部
@@ -1770,7 +2230,6 @@ export function StocksPage() {
                                     className="rounded-md border border-[var(--border-soft)] bg-white/35 px-2 py-1 text-xs font-semibold text-[var(--text-muted)] hover:bg-white/55"
                                     onMouseDown={(e) => e.preventDefault()}
                                     onClick={() => setBarsPickerOpen(false)}
-                                    disabled={busy}
                                     title="关闭"
                                   >
                                     关闭
@@ -1790,13 +2249,12 @@ export function StocksPage() {
                                   : "border-[var(--border-soft)] bg-white/35 text-[var(--text-muted)] hover:bg-white/55",
                               ].join(" ")}
                               onClick={() => setMaPickerOpen((v) => !v)}
-                              disabled={busy}
                               title="选择MA周期（可多选）"
                             >
                               MA
                             </button>
                             {maPickerOpen ? (
-                              <div className="absolute left-0 top-full z-20 mt-1 w-[320px] max-w-[calc(100vw-3rem)] rounded-lg border border-[var(--border-soft)] bg-white/90 p-2 shadow-lg backdrop-blur">
+                              <div className="absolute left-0 top-full z-50 mt-1 w-[320px] max-w-[calc(100vw-3rem)] rounded-lg border border-[var(--border-soft)] bg-white/90 p-2 shadow-lg backdrop-blur">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   {ALL_MA_PERIODS.map((p) => {
                                     const active = (maPeriods || []).includes(p);
@@ -1819,7 +2277,6 @@ export function StocksPage() {
                                             return Array.from(s.values()).sort((a, b) => a - b);
                                           })
                                         }
-                                        disabled={busy}
                                         title={`MA${p}`}
                                       >
                                         {p}
@@ -1832,7 +2289,6 @@ export function StocksPage() {
                                     className="rounded-md border border-[var(--border-soft)] bg-white/35 px-2 py-1 text-xs font-semibold text-[var(--text-muted)] hover:bg-white/55"
                                     onMouseDown={(e) => e.preventDefault()}
                                     onClick={() => setMaPeriods([])}
-                                    disabled={busy}
                                     title="清空MA"
                                   >
                                     清空
@@ -1842,7 +2298,6 @@ export function StocksPage() {
                                     className="rounded-md border border-[var(--border-soft)] bg-white/35 px-2 py-1 text-xs font-semibold text-[var(--text-muted)] hover:bg-white/55"
                                     onMouseDown={(e) => e.preventDefault()}
                                     onClick={() => setMaPickerOpen(false)}
-                                    disabled={busy}
                                     title="关闭"
                                   >
                                     关闭
@@ -1861,7 +2316,6 @@ export function StocksPage() {
                                 : "border-[var(--border-soft)] bg-white/35 text-[var(--text-muted)] hover:bg-white/55",
                             ].join(" ")}
                             onClick={() => setShowBoll((v) => !v)}
-                            disabled={busy}
                             title="布林线（20,2）"
                           >
                             布林线
@@ -1939,4 +2393,3 @@ export function StocksPage() {
     </div>
   );
 }
-

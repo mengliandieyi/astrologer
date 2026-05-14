@@ -5,6 +5,7 @@ import {
   createStockScreenerRun,
   finishStockScreenerRun,
   insertStockScreenerResults,
+  getStockDailyRange,
 } from "./store.js";
 
 function nowIso() {
@@ -50,52 +51,70 @@ export async function runStockScreener(args: {
   });
 
   try {
-    // 实际情况：避免对每个股票逐个拉行情（会被限频）。
-    // 采用“按交易日批量拉全市场 daily”方式，取近 lookbackDays*2 天窗口，跳过无数据日期。
+    // 优先读 MySQL 缓存（stock_daily_cache）。每日 17:00 定时同步全市场 daily。
+    // 若缓存覆盖天数不足，再按交易日回退到 Tushare 现拉。
     const end = ymdToday();
     const start = dayAdd(end, -lookbackDays * 2);
 
-    // Pull daily rows in one range per date (trade_date) to reduce requests.
-    // We'll just try each day in [start..end], skipping empty responses (weekend/holiday).
-    const days: string[] = [];
-    for (let d = start; d <= end; ) {
-      days.push(d);
-      d = dayAdd(d, 1);
-      if (!d) break;
-    }
-
-    // Build per-symbol candles from fetched rows.
     const perSymbol = new Map<
       string,
       Array<{ t: string; open: number; high: number; low: number; close: number; vol: number; amount: number }>
     >();
 
-    for (const trade_date of days) {
-      const rows = await tushareQuery({
-        api_name: "daily",
-        params: { trade_date },
-        fields: ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
+    const cachedRows = await getStockDailyRange({ start_date: start, end_date: end });
+    const cachedTradeDates = new Set<string>();
+    for (const r of cachedRows) {
+      cachedTradeDates.add(String(r.trade_date));
+      const sym = String(r.ts_code || "").toUpperCase();
+      if (!sym) continue;
+      const arr = perSymbol.get(sym) || [];
+      arr.push({
+        t: String(r.trade_date),
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        vol: Number(r.vol),
+        amount: Number(r.amount),
       });
-      if (!rows?.length) continue;
-      for (const r of rows as any[]) {
-        const sym = String(r.ts_code || "").toUpperCase();
-        if (!sym) continue;
-        const arr = perSymbol.get(sym) || [];
-        arr.push({
-          t: String(r.trade_date),
-          open: Number(r.open),
-          high: Number(r.high),
-          low: Number(r.low),
-          close: Number(r.close),
-          vol: Number(r.vol),
-          amount: Number(r.amount),
+      perSymbol.set(sym, arr);
+    }
+
+    // 若缓存为空（如冷启动），回退到按日拉取 Tushare（每日一调用）。
+    if (cachedTradeDates.size === 0) {
+      const days: string[] = [];
+      for (let d = start; d <= end; ) {
+        days.push(d);
+        d = dayAdd(d, 1);
+        if (!d) break;
+      }
+      for (const trade_date of days) {
+        const rows = await tushareQuery({
+          api_name: "daily",
+          params: { trade_date },
+          fields: ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
         });
-        perSymbol.set(sym, arr);
+        if (!rows?.length) continue;
+        for (const r of rows as any[]) {
+          const sym = String(r.ts_code || "").toUpperCase();
+          if (!sym) continue;
+          const arr = perSymbol.get(sym) || [];
+          arr.push({
+            t: String(r.trade_date),
+            open: Number(r.open),
+            high: Number(r.high),
+            low: Number(r.low),
+            close: Number(r.close),
+            vol: Number(r.vol),
+            amount: Number(r.amount),
+          });
+          perSymbol.set(sym, arr);
+        }
       }
     }
 
     // Compute signals and rank.
-    const scored: Array<{
+    const scoredAll: Array<{
       symbol: string;
       score: number | null;
       reasons_json: Record<string, unknown>;
@@ -111,10 +130,9 @@ export async function runStockScreener(args: {
       const s = signals.find((x) => x.strategy === args.strategy);
       const scoreRaw = (reasons_json as any)?.scores?.[args.strategy];
       const score = scoreRaw == null ? null : Number(scoreRaw);
-      // Only consider hit/near; miss will be placed after anyway.
       const status = s?.status || "miss";
       const statusBoost = status === "hit" ? 1000 : status === "near" ? 500 : 0;
-      scored.push({
+      scoredAll.push({
         symbol,
         score: score == null || !Number.isFinite(score) ? null : score,
         reasons_json: reasons_json as any,
@@ -126,10 +144,14 @@ export async function runStockScreener(args: {
         },
       });
       // Use statusBoost in sort (below) without mutating stored score.
-      (scored[scored.length - 1] as any)._rank = statusBoost + (Number.isFinite(score) ? Number(score) : 0);
+      (scoredAll[scoredAll.length - 1] as any)._rank = statusBoost + (Number.isFinite(score) ? Number(score) : 0);
     }
 
-    scored.sort((a: any, b: any) => Number(b._rank || 0) - Number(a._rank || 0));
+    scoredAll.sort((a: any, b: any) => Number(b._rank || 0) - Number(a._rank || 0));
+
+    // 只持久化 hit / near；全市场无命中时写入 0 条（不再用 miss 凑 TopN）
+    const scored = scoredAll.filter((x) => String((x.snapshot_json as any)?.status || "") !== "miss");
+
     const top = scored.slice(0, topN);
 
     // Enrich name in bulk-ish: use symbolMaster cache search by code.

@@ -1,9 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { LunarYear } from "lunar-javascript";
+import { GripVertical, Trash2 } from "lucide-react";
 import { RegionCombobox } from "../../components/bazi/RegionCombobox";
 import { Button } from "../../components/ui/button";
-import { authLogout, authMe, createProfile, deleteProfile, getProfile, listProfiles, updateProfile, type Profile } from "../../lib/authClient";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { authLogout, authMe, createProfile, deleteProfile, getProfile, listProfiles, reorderProfiles, updateProfile, type Profile } from "../../lib/authClient";
 import { TIMEZONE_OPTIONS_ZH } from "../../lib/timezonesZh";
 
 function explainError(message: string): string {
@@ -11,8 +30,11 @@ function explainError(message: string): string {
   if (message.includes("unauthorized")) return "请先登录";
   if (message.includes("profile_name_required")) return "请输入档案名称";
   if (message.includes("profile_name_taken")) return "该档案名已存在，请换一个";
-  if (message.includes("profile_has_charts")) return "该档案下已有历史排盘，无法删除（可先迁移或保留）。";
+  if (message.includes("profile_not_found")) return "档案不存在或已被删除，请刷新页面。";
+  if (message.includes("profile_has_charts")) return "该档案下已有历史排盘，无法删除（请先升级服务端或联系管理员）。";
   if (message.includes("profiles_requires_mysql")) return "当前环境未启用 MySQL（档案功能需要 MySQL）。";
+  if (message.includes("profile_reorder_invalid")) return "排序失败：请刷新页面后重试。";
+  if (message.includes("ordered_ids_required")) return "排序参数无效。";
   return message.slice(0, 160);
 }
 
@@ -28,6 +50,70 @@ function pickGender(meta: Record<string, unknown> | undefined): 0 | 1 | null {
   return Number.isFinite(n) ? (n === 0 ? 0 : 1) : null;
 }
 
+function ProfileSortableRow(props: {
+  profile: Profile;
+  summary: string;
+  isActive: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
+  const { profile: p, summary, isActive, disabled, onSelect, onDelete } = props;
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: p.id,
+    disabled,
+  });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.92 : 1,
+    zIndex: isDragging ? 2 : undefined,
+    position: "relative" as const,
+    boxShadow: isDragging ? "0 10px 28px rgba(28, 25, 23, 0.12)" : undefined,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`flex gap-0.5 rounded-xl border px-1 py-1 transition ${
+        isActive
+          ? "border-[rgba(74,120,108,0.42)] bg-[rgba(74,120,108,0.06)]"
+          : "border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
+      }`}
+    >
+      <button
+        type="button"
+        className="flex shrink-0 cursor-grab touch-none items-center justify-center rounded-lg px-1 py-2 text-[var(--text-muted)] hover:bg-[var(--surface-panel)] hover:text-[var(--text-strong)] active:cursor-grabbing disabled:pointer-events-none disabled:opacity-40"
+        aria-label="拖动调整顺序"
+        title="拖动调整顺序"
+        disabled={disabled}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-4 w-4" strokeWidth={2} />
+      </button>
+      <button type="button" className="min-w-0 flex-1 rounded-lg px-1 py-0.5 text-left" onClick={onSelect}>
+        <div className="text-sm font-extrabold text-[var(--text-strong)]">{p.name}</div>
+        <div className="mt-0.5 text-xs text-[var(--text-muted)]">{summary || "未完善出生信息（无法排盘）"}</div>
+      </button>
+      <button
+        type="button"
+        className="flex shrink-0 items-center justify-center rounded-lg px-1.5 py-2 text-[var(--text-muted)] hover:bg-[rgba(179,38,30,0.08)] hover:text-[var(--bazi-danger)] disabled:pointer-events-none disabled:opacity-40"
+        aria-label={`删除档案「${p.name}」`}
+        title="删除该档案"
+        disabled={disabled}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void onDelete();
+        }}
+      >
+        <Trash2 className="h-4 w-4" strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
+
 export function MyProfiles() {
   const nav = useNavigate();
   const [params] = useSearchParams();
@@ -38,9 +124,18 @@ export function MyProfiles() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
 
   const [activeId, setActiveId] = useState<number | null>(null);
   const active = useMemo(() => profiles.find((p) => p.id === activeId) || null, [profiles, activeId]);
+
+  const deleteConfirmDescription = useMemo(() => {
+    if (deleteTarget == null) return undefined;
+    const p = profiles.find((x) => x.id === deleteTarget);
+    return p
+      ? `确定删除「${p.name}」？将一并删除该档案下的历史排盘、AI 解读缓存，以及以该档案为参与方的合盘记录（不可恢复）。`
+      : "确定删除该档案？将一并删除关联的历史排盘与合盘记录（不可恢复）。";
+  }, [deleteTarget, profiles]);
 
   const [name, setName] = useState("");
   const [relation, setRelation] = useState("");
@@ -161,14 +256,39 @@ export function MyProfiles() {
     if (loc) setBirthLocation(loc);
   }, [province, city, district]);
 
-  async function refreshList(selectId?: number) {
+  async function refreshList(selectId?: number): Promise<number | null> {
     const out = await listProfiles();
     const ps = (out.profiles || []) as Profile[];
     setProfiles(ps);
-    const nextId = selectId ?? ps[0]?.id ?? null;
+    const nextId = selectId != null && ps.some((p) => p.id === selectId) ? selectId : ps[0]?.id ?? null;
     setActiveId(nextId);
     const picked = ps.find((p) => p.id === nextId) || null;
     if (picked) loadForm(picked);
+    return nextId;
+  }
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+
+  async function handleProfileDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = profiles.findIndex((pr) => pr.id === Number(active.id));
+    const newIndex = profiles.findIndex((pr) => pr.id === Number(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    const nextOrder = arrayMove(profiles, oldIndex, newIndex);
+    setBusy(true);
+    setErr("");
+    try {
+      await reorderProfiles(nextOrder.map((x) => x.id));
+      await refreshList(activeId ?? undefined);
+    } catch (e: any) {
+      setErr(explainError(String((e as any)?.message || e)));
+    } finally {
+      setBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -264,19 +384,34 @@ export function MyProfiles() {
     }
   }
 
-  async function removeActive() {
-    if (!activeId) return;
-    if (!window.confirm("确认删除该档案？（有历史排盘的档案无法删除）")) return;
+  function requestDeleteProfile(profileId: number) {
+    setDeleteTarget(profileId);
+  }
+
+  async function performDeleteProfile(profileId: number) {
     setBusy(true);
     setErr("");
     try {
-      await deleteProfile(activeId);
-      await refreshList();
+      await deleteProfile(profileId);
+      const wasActive = activeId === profileId;
+      const nextId = await refreshList(wasActive ? undefined : activeId ?? undefined);
+      if (wasActive) {
+        if (nextId != null) {
+          nav(`/my/profiles?edit=${encodeURIComponent(String(nextId))}`, { replace: true });
+        } else {
+          nav("/my/profiles", { replace: true });
+        }
+      }
     } catch (e: any) {
-      setErr(explainError(String(e?.message || e)));
+      setErr(explainError(String((e as any)?.message || e)));
     } finally {
       setBusy(false);
     }
+  }
+
+  function removeActive() {
+    if (!activeId) return;
+    requestDeleteProfile(activeId);
   }
 
   return (
@@ -286,7 +421,6 @@ export function MyProfiles() {
           <h1 id="my-profiles-title" className="home-landing-title">
             我的档案
           </h1>
-          <p className="home-landing-subline mt-2">档案信息固定保存；排盘时将自动使用档案出生信息。</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button asChild variant="ghost" size="sm">
@@ -318,7 +452,6 @@ export function MyProfiles() {
       <section className="mt-2 grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-[1fr_1.6fr] lg:items-start">
         <div className="home-landing-surface min-w-0 p-5 sm:p-6">
           <div className="text-sm font-extrabold text-[var(--text-strong)]">档案列表</div>
-          <p className="mt-1 text-xs text-[var(--text-muted)]">可创建多个档案。</p>
 
           {err ? (
             <div className="home-landing-surface-inset mt-3 px-4 py-3 text-sm text-[var(--bazi-danger)]">
@@ -330,38 +463,36 @@ export function MyProfiles() {
             {profiles.length === 0 ? (
               <div className="text-sm text-[var(--text-muted)]">暂无档案。点击右上角「新建档案」。</div>
             ) : (
-              profiles.map((p) => {
-                const meta = (p.meta ?? {}) as Record<string, unknown>;
-                const summary = [
-                  pick(meta, "relation") ? `关系：${pick(meta, "relation")}` : "",
-                  pick(meta, "birth_date") ? `生日：${pick(meta, "birth_date")}` : "",
-                  pick(meta, "birth_location") ? `地点：${pick(meta, "birth_location")}` : "",
-                ]
-                  .filter(Boolean)
-                  .join(" · ");
-                const isActive = p.id === activeId;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className={`home-landing-surface-inset w-full rounded-xl border px-3 py-2 text-left transition ${
-                      isActive
-                        ? "border-[rgba(74,120,108,0.42)] bg-[rgba(74,120,108,0.06)]"
-                        : "border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
-                    }`}
-                    onClick={() => {
-                      setActiveId(p.id);
-                      loadForm(p);
-                      nav(`/my/profiles?edit=${encodeURIComponent(String(p.id))}`, { replace: true });
-                    }}
-                  >
-                    <div className="text-sm font-extrabold text-[var(--text-strong)]">{p.name}</div>
-                    <div className="mt-0.5 text-xs text-[var(--text-muted)]">
-                      {summary || "未完善出生信息（无法排盘）"}
-                    </div>
-                  </button>
-                );
-              })
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(e) => void handleProfileDragEnd(e)}>
+                <SortableContext items={profiles.map((p) => p.id)} strategy={verticalListSortingStrategy}>
+                  {profiles.map((p) => {
+                    const meta = (p.meta ?? {}) as Record<string, unknown>;
+                    const summary = [
+                      pick(meta, "relation") ? `关系：${pick(meta, "relation")}` : "",
+                      pick(meta, "birth_date") ? `生日：${pick(meta, "birth_date")}` : "",
+                      pick(meta, "birth_location") ? `地点：${pick(meta, "birth_location")}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ");
+                    const isActive = p.id === activeId;
+                    return (
+                      <ProfileSortableRow
+                        key={p.id}
+                        profile={p}
+                        summary={summary}
+                        isActive={isActive}
+                        disabled={busy}
+                        onSelect={() => {
+                          setActiveId(p.id);
+                          loadForm(p);
+                          nav(`/my/profiles?edit=${encodeURIComponent(String(p.id))}`, { replace: true });
+                        }}
+                        onDelete={() => requestDeleteProfile(p.id)}
+                      />
+                    );
+                  })}
+                </SortableContext>
+              </DndContext>
             )}
           </div>
         </div>
@@ -561,7 +692,7 @@ export function MyProfiles() {
                 >
                   去排盘
                 </Button>
-                <Button variant="secondary" onClick={() => void removeActive()} disabled={busy}>
+                <Button variant="secondary" onClick={removeActive} disabled={busy}>
                   删除档案
                 </Button>
               </div>
@@ -569,6 +700,23 @@ export function MyProfiles() {
           )}
         </div>
       </section>
+
+      <ConfirmDialog
+        open={deleteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        title="删除档案"
+        description={deleteConfirmDescription}
+        danger
+        busy={busy}
+        onConfirm={async () => {
+          const id = deleteTarget;
+          if (id == null) return;
+          setDeleteTarget(null);
+          await performDeleteProfile(id);
+        }}
+      />
     </div>
   );
 }

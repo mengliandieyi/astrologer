@@ -27,6 +27,12 @@ function buildPinyin(name: string) {
   return { full: full.toLowerCase(), initials: initials.toLowerCase() };
 }
 
+function strField(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+
 async function loadAllStockBasics(): Promise<SymbolMasterItem[]> {
   const rows = await tushareQuery({
     api_name: "stock_basic",
@@ -48,12 +54,23 @@ async function loadAllStockBasics(): Promise<SymbolMasterItem[]> {
       code,
       name,
       exchange,
-      market: r.market == null ? null : String(r.market),
-      area: r.area == null ? null : String(r.area),
-      industry: r.industry == null ? null : String(r.industry),
+      market: strField(r.market),
+      area: strField(r.area),
+      industry: strField(r.industry),
       pinyin_full: py.full,
       pinyin_initials: py.initials,
     });
+  }
+  const n = out.length;
+  if (n > 200) {
+    const withSector = out.filter((x) => x.industry || x.market).length;
+    const ratio = withSector / n;
+    if (ratio < 0.05) {
+      console.warn(
+        `[symbolMaster] stock_basic: ${n} 条中仅 ${withSector} 条含 industry/market（${(ratio * 100).toFixed(1)}%）。` +
+          " 常见原因：Tushare 积分不足（官方要求 stock_basic 约 2000 积分起）、或返回里缺字段。请在 tushare 数据工具用同一 token 抽查 industry 列。"
+      );
+    }
   }
   return out;
 }
@@ -101,5 +118,11 @@ export async function searchSymbolMaster(args: { q: string; limit: number }): Pr
 
   hits.sort((a, b) => b.score - a.score || a.item.ts_code.localeCompare(b.item.ts_code));
   return hits.slice(0, limit).map((h) => h.item);
+}
+
+/** 返回全量精简 master（含拼音字段，便于前端本地匹配）+ 版本号（loadedAtMs） */
+export async function getAllSymbolMaster(): Promise<{ version: number; items: SymbolMasterItem[] }> {
+  const items = await ensureCache();
+  return { version: cache?.loadedAtMs || Date.now(), items };
 }
 

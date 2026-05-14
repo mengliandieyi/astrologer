@@ -138,6 +138,8 @@ export type StoredProfile = {
   meta?: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  /** 越大越靠前；列表按 sort_index desc, id desc */
+  sort_index?: number;
 };
 
 type DbShape = {
@@ -263,6 +265,17 @@ async function ensureMysql(): Promise<mysql.Pool> {
       await pool.execute("alter table profiles modify column meta mediumtext not null");
     } catch {
       // ignore
+    }
+    let sortColumnAdded = false;
+    try {
+      await pool.execute("alter table profiles add column sort_index int not null default 0");
+      sortColumnAdded = true;
+    } catch (e: any) {
+      const msg = String(e?.message || e || "");
+      if (!/duplicate column|Duplicate column name/i.test(msg)) throw e;
+    }
+    if (sortColumnAdded) {
+      await backfillProfileSortIndexes(pool);
     }
     // Minimal schema: users will be created by auth module; core data tables here.
     await pool.execute(`
@@ -899,20 +912,137 @@ export async function listStockScreenerRuns(args: {
   }));
 }
 
-export async function listStockScreenerResults(args: {
-  run_id: number;
-  limit?: number;
-}): Promise<StoredStockScreenerResult[]> {
-  const lim = Number.isFinite(args.limit) ? Math.max(1, Math.min(300, Math.floor(args.limit!))) : 50;
+export type ScreenerResultsSort = "score" | "symbol" | "created_at";
+export type ScreenerResultsOrder = "asc" | "desc";
+
+function buildScreenerResultsOrderSql(sort: ScreenerResultsSort, order: ScreenerResultsOrder, dialect: "mysql" | "pg" | "sqlite"): string {
+  const dir = order === "asc" ? "asc" : "desc";
+  const opp = order === "asc" ? "desc" : "asc";
+  if (sort === "symbol") return `symbol ${dir}, id ${dir}`;
+  if (sort === "created_at") return `created_at ${dir}, id ${dir}`;
+  // score
+  if (dialect === "pg") return `score ${dir} nulls last, id ${opp === "asc" ? "asc" : "asc"}`;
+  return `score ${dir}, id asc`;
+}
+
+export async function getStockScreenerRunById(run_id: number): Promise<StoredStockScreenerRun | null> {
+  if (!Number.isFinite(run_id) || run_id <= 0) return null;
   if (storageMode === "mysql") {
     const pool = await ensureMysql();
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      `select id, user_id, strategy, effective_asof, freq, params_json, status, error, started_at, finished_at
+       from stock_screener_runs where id = ? limit 1`,
+      [run_id]
+    );
+    const r = (rows as any[])[0];
+    if (!r) return null;
+    return {
+      id: Number(r.id),
+      user_id: Number(r.user_id),
+      strategy: String(r.strategy) as any,
+      effective_asof: formatMysqlDateLike(r.effective_asof),
+      freq: String(r.freq) as any,
+      params_json: typeof r.params_json === "string" ? JSON.parse(r.params_json) : (r.params_json ?? {}),
+      status: String(r.status) as any,
+      error: r.error == null ? null : String(r.error),
+      started_at: formatMysqlDatetimeLike(r.started_at),
+      finished_at: r.finished_at == null ? null : formatMysqlDatetimeLike(r.finished_at),
+    };
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    const r = await pool.query(
+      "select id, user_id, strategy, effective_asof, freq, params_json, status, error, started_at, finished_at from stock_screener_runs where id=$1 limit 1",
+      [run_id]
+    );
+    const x = (r.rows as any[])[0];
+    if (!x) return null;
+    return {
+      id: Number(x.id),
+      user_id: Number(x.user_id),
+      strategy: String(x.strategy) as any,
+      effective_asof: String(x.effective_asof),
+      freq: String(x.freq) as any,
+      params_json: x.params_json ?? {},
+      status: String(x.status) as any,
+      error: x.error == null ? null : String(x.error),
+      started_at: new Date(x.started_at).toISOString(),
+      finished_at: x.finished_at ? new Date(x.finished_at).toISOString() : null,
+    };
+  }
+  const db = ensureSqlite();
+  const r = db
+    .prepare(
+      "select id, user_id, strategy, effective_asof, freq, params_json, status, error, started_at, finished_at from stock_screener_runs where id = ? limit 1"
+    )
+    .get(run_id) as any;
+  if (!r) return null;
+  return {
+    id: Number(r.id),
+    user_id: Number(r.user_id),
+    strategy: String(r.strategy) as any,
+    effective_asof: String(r.effective_asof),
+    freq: String(r.freq) as any,
+    params_json: JSON.parse(String(r.params_json || "{}")),
+    status: String(r.status) as any,
+    error: r.error == null ? null : String(r.error),
+    started_at: String(r.started_at),
+    finished_at: r.finished_at == null ? null : String(r.finished_at),
+  };
+}
+
+/** 删除一次策略选股运行及其结果（仅当 run 属于该 user）。 */
+export async function deleteStockScreenerRunForUser(args: { run_id: number; user_id: number }): Promise<{ ok: boolean; error?: string }> {
+  const run_id = Math.floor(Number(args.run_id));
+  const user_id = Math.floor(Number(args.user_id));
+  if (!Number.isFinite(run_id) || run_id <= 0 || !Number.isFinite(user_id) || user_id <= 0) return { ok: false, error: "bad_request" };
+  const run = await getStockScreenerRunById(run_id);
+  if (!run || run.user_id !== user_id) return { ok: false, error: "not_found" };
+  if (run.status === "running") return { ok: false, error: "run_in_progress" };
+
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    await pool.execute("delete from stock_screener_results where run_id = ?", [run_id]);
+    const [r] = await pool.execute("delete from stock_screener_runs where id = ? and user_id = ? limit 1", [run_id, user_id]);
+    const n = Number((r as any)?.affectedRows ?? 0);
+    return n > 0 ? { ok: true } : { ok: false, error: "not_found" };
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    await pool.query("delete from stock_screener_results where run_id=$1", [run_id]);
+    const r = await pool.query("delete from stock_screener_runs where id=$1 and user_id=$2", [run_id, user_id]);
+    const n = Number((r as any)?.rowCount ?? 0);
+    return n > 0 ? { ok: true } : { ok: false, error: "not_found" };
+  }
+  const db = ensureSqlite();
+  db.prepare("delete from stock_screener_results where run_id = ?").run(run_id);
+  const info = db.prepare("delete from stock_screener_runs where id = ? and user_id = ?").run(run_id, user_id);
+  return Number(info.changes || 0) > 0 ? { ok: true } : { ok: false, error: "not_found" };
+}
+
+/** 默认剔除未命中：无 hit/near 时结果为空（与「无命中则无数据」一致）。filter_miss=0 时保留 miss（排障/导出）。 */
+export function applyScreenerFilterMiss<T extends { snapshot_json: any }>(rows: T[], filterMiss: boolean): T[] {
+  if (!filterMiss) return rows;
+  return rows.filter((r) => String(r?.snapshot_json?.status ?? "") !== "miss");
+}
+
+/** 一次运行最多约 200 条（topN 上限），全量读出后在服务层筛选/分页。 */
+export async function listAllStockScreenerResultsForRun(
+  run_id: number,
+  sort: ScreenerResultsSort,
+  order: ScreenerResultsOrder
+): Promise<StoredStockScreenerResult[]> {
+  const s: ScreenerResultsSort = sort === "symbol" || sort === "created_at" ? sort : "score";
+  const o: ScreenerResultsOrder = order === "asc" ? "asc" : "desc";
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    const orderSql = buildScreenerResultsOrderSql(s, o, "mysql");
     const [rows] = await pool.execute<mysql.RowDataPacket[]>(
       `select id, run_id, symbol, name, score, snapshot_json, reasons_json, created_at
        from stock_screener_results
        where run_id = ?
-       order by score desc, id asc
-       limit ${lim}`,
-      [args.run_id]
+       order by ${orderSql}`,
+      [run_id]
     );
     return (rows as any[]).map((r) => ({
       id: Number(r.id),
@@ -927,9 +1057,10 @@ export async function listStockScreenerResults(args: {
   }
   if (storageMode === "postgres") {
     const pool = await ensurePg();
+    const orderSql = buildScreenerResultsOrderSql(s, o, "pg");
     const r = await pool.query(
-      "select id, run_id, symbol, name, score, snapshot_json, reasons_json, created_at from stock_screener_results where run_id=$1 order by score desc nulls last, id asc limit $2",
-      [args.run_id, lim]
+      `select id, run_id, symbol, name, score, snapshot_json, reasons_json, created_at from stock_screener_results where run_id=$1 order by ${orderSql}`,
+      [run_id]
     );
     return (r.rows as any[]).map((x) => ({
       id: Number(x.id),
@@ -937,17 +1068,36 @@ export async function listStockScreenerResults(args: {
       symbol: String(x.symbol),
       name: x.name == null ? null : String(x.name),
       score: x.score == null ? null : Number(x.score),
-      snapshot_json: x.snapshot_json ?? {},
-      reasons_json: x.reasons_json ?? {},
+      snapshot_json:
+        typeof x.snapshot_json === "string"
+          ? (() => {
+              try {
+                return JSON.parse(x.snapshot_json || "{}");
+              } catch {
+                return {};
+              }
+            })()
+          : (x.snapshot_json ?? {}),
+      reasons_json:
+        typeof x.reasons_json === "string"
+          ? (() => {
+              try {
+                return JSON.parse(x.reasons_json || "{}");
+              } catch {
+                return {};
+              }
+            })()
+          : (x.reasons_json ?? {}),
       created_at: new Date(x.created_at).toISOString(),
     }));
   }
   const db = ensureSqlite();
+  const orderSql = buildScreenerResultsOrderSql(s, o, "sqlite");
   const rows = db
     .prepare(
-      "select id, run_id, symbol, name, score, snapshot_json, reasons_json, created_at from stock_screener_results where run_id = ? order by score desc limit ?"
+      `select id, run_id, symbol, name, score, snapshot_json, reasons_json, created_at from stock_screener_results where run_id = ? order by ${orderSql}`
     )
-    .all(args.run_id, lim) as any[];
+    .all(run_id) as any[];
   return rows.map((r) => ({
     id: Number(r.id),
     run_id: Number(r.run_id),
@@ -958,6 +1108,234 @@ export async function listStockScreenerResults(args: {
     reasons_json: JSON.parse(String(r.reasons_json || "{}")),
     created_at: String(r.created_at),
   }));
+}
+
+/** 在应用 filter_miss 后的条数（与列表 total 对齐）。 */
+export async function countStockScreenerResults(run_id: number, filterMiss = true): Promise<number> {
+  const all = await listAllStockScreenerResultsForRun(run_id, "score", "desc");
+  return applyScreenerFilterMiss(all, filterMiss).length;
+}
+
+export async function listStockScreenerResults(args: {
+  run_id: number;
+  limit?: number;
+  offset?: number;
+  sort?: ScreenerResultsSort;
+  order?: ScreenerResultsOrder;
+  filterMiss?: boolean;
+}): Promise<StoredStockScreenerResult[]> {
+  const lim = Number.isFinite(args.limit) ? Math.max(1, Math.min(300, Math.floor(args.limit!))) : 50;
+  const off = Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset!)) : 0;
+  const sort: ScreenerResultsSort =
+    args.sort === "symbol" || args.sort === "created_at" ? args.sort : "score";
+  const order: ScreenerResultsOrder = args.order === "asc" ? "asc" : "desc";
+  const filterMiss = args.filterMiss !== false;
+  const all = await listAllStockScreenerResultsForRun(args.run_id, sort, order);
+  const filtered = applyScreenerFilterMiss(all, filterMiss);
+  return filtered.slice(off, off + lim);
+}
+
+export type StockDailyRow = {
+  ts_code: string;
+  trade_date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  vol: number;
+  amount: number;
+};
+
+export async function upsertStockDailyRows(rows: StockDailyRow[]): Promise<number> {
+  if (!rows?.length) return 0;
+  const clean = rows
+    .map((r) => ({
+      ts_code: String(r.ts_code || "").toUpperCase(),
+      trade_date: String(r.trade_date || "").replaceAll("-", ""),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      vol: Number(r.vol),
+      amount: Number(r.amount),
+    }))
+    .filter(
+      (r) =>
+        r.ts_code &&
+        /^\d{8}$/.test(r.trade_date) &&
+        Number.isFinite(r.open) &&
+        Number.isFinite(r.high) &&
+        Number.isFinite(r.low) &&
+        Number.isFinite(r.close)
+    );
+  if (!clean.length) return 0;
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    const batchSize = 500;
+    let inserted = 0;
+    for (let i = 0; i < clean.length; i += batchSize) {
+      const batch = clean.slice(i, i + batchSize);
+      const placeholders = batch.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+      const values: any[] = [];
+      for (const r of batch) {
+        values.push(r.ts_code, r.trade_date, r.open, r.high, r.low, r.close, r.vol, r.amount);
+      }
+      const sql =
+        "insert into stock_daily_cache(ts_code, trade_date, open, high, low, close, vol, amount) values " +
+        placeholders +
+        " on duplicate key update open=values(open), high=values(high), low=values(low), close=values(close), vol=values(vol), amount=values(amount)";
+      const [res] = await pool.execute<mysql.ResultSetHeader>(sql, values);
+      inserted += Number((res as any)?.affectedRows || 0);
+    }
+    return inserted;
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    let n = 0;
+    for (const r of clean) {
+      await pool.query(
+        `insert into stock_daily_cache(ts_code, trade_date, open, high, low, close, vol, amount)
+         values($1,$2,$3,$4,$5,$6,$7,$8)
+         on conflict (ts_code, trade_date) do update set
+           open=excluded.open, high=excluded.high, low=excluded.low,
+           close=excluded.close, vol=excluded.vol, amount=excluded.amount`,
+        [r.ts_code, r.trade_date, r.open, r.high, r.low, r.close, r.vol, r.amount]
+      );
+      n += 1;
+    }
+    return n;
+  }
+  const db = ensureSqlite();
+  const stmt = db.prepare(
+    "insert into stock_daily_cache(ts_code, trade_date, open, high, low, close, vol, amount) values(?, ?, ?, ?, ?, ?, ?, ?) on conflict(ts_code, trade_date) do update set open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close, vol=excluded.vol, amount=excluded.amount"
+  );
+  let n = 0;
+  for (const r of clean) {
+    stmt.run(r.ts_code, r.trade_date, r.open, r.high, r.low, r.close, r.vol, r.amount);
+    n += 1;
+  }
+  return n;
+}
+
+export async function getStockDailyRange(args: {
+  ts_code?: string;
+  start_date: string;
+  end_date: string;
+}): Promise<StockDailyRow[]> {
+  const start = String(args.start_date || "").replaceAll("-", "");
+  const end = String(args.end_date || "").replaceAll("-", "");
+  if (!/^\d{8}$/.test(start) || !/^\d{8}$/.test(end)) return [];
+  const ts = args.ts_code ? String(args.ts_code).toUpperCase() : "";
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    if (ts) {
+      const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+        `select ts_code, trade_date, open, high, low, close, vol, amount
+         from stock_daily_cache
+         where ts_code = ? and trade_date between ? and ?
+         order by trade_date asc`,
+        [ts, start, end]
+      );
+      return (rows as any[]).map((r) => ({
+        ts_code: String(r.ts_code),
+        trade_date: String(r.trade_date),
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        vol: Number(r.vol),
+        amount: Number(r.amount),
+      }));
+    }
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      `select ts_code, trade_date, open, high, low, close, vol, amount
+       from stock_daily_cache
+       where trade_date between ? and ?
+       order by trade_date asc, ts_code asc`,
+      [start, end]
+    );
+    return (rows as any[]).map((r) => ({
+      ts_code: String(r.ts_code),
+      trade_date: String(r.trade_date),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      vol: Number(r.vol),
+      amount: Number(r.amount),
+    }));
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    const sql = ts
+      ? "select ts_code, trade_date, open, high, low, close, vol, amount from stock_daily_cache where ts_code=$1 and trade_date between $2 and $3 order by trade_date asc"
+      : "select ts_code, trade_date, open, high, low, close, vol, amount from stock_daily_cache where trade_date between $1 and $2 order by trade_date asc, ts_code asc";
+    const params = ts ? [ts, start, end] : [start, end];
+    const r = await pool.query(sql, params);
+    return (r.rows as any[]).map((x) => ({
+      ts_code: String(x.ts_code),
+      trade_date: String(x.trade_date),
+      open: Number(x.open),
+      high: Number(x.high),
+      low: Number(x.low),
+      close: Number(x.close),
+      vol: Number(x.vol),
+      amount: Number(x.amount),
+    }));
+  }
+  const db = ensureSqlite();
+  if (ts) {
+    const rows = db
+      .prepare(
+        "select ts_code, trade_date, open, high, low, close, vol, amount from stock_daily_cache where ts_code = ? and trade_date between ? and ? order by trade_date asc"
+      )
+      .all(ts, start, end) as any[];
+    return rows.map((r) => ({
+      ts_code: String(r.ts_code),
+      trade_date: String(r.trade_date),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      vol: Number(r.vol),
+      amount: Number(r.amount),
+    }));
+  }
+  const rows = db
+    .prepare(
+      "select ts_code, trade_date, open, high, low, close, vol, amount from stock_daily_cache where trade_date between ? and ? order by trade_date asc, ts_code asc"
+    )
+    .all(start, end) as any[];
+  return rows.map((r) => ({
+    ts_code: String(r.ts_code),
+    trade_date: String(r.trade_date),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    vol: Number(r.vol),
+    amount: Number(r.amount),
+  }));
+}
+
+export async function getStockDailyMaxDate(): Promise<string | null> {
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      "select max(trade_date) as max_date from stock_daily_cache"
+    );
+    const v = (rows as any[])[0]?.max_date;
+    return v ? String(v) : null;
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    const r = await pool.query("select max(trade_date) as max_date from stock_daily_cache");
+    const v = (r.rows as any[])[0]?.max_date;
+    return v ? String(v) : null;
+  }
+  const db = ensureSqlite();
+  const row = db.prepare("select max(trade_date) as max_date from stock_daily_cache").get() as any;
+  return row?.max_date ? String(row.max_date) : null;
 }
 
 function toMysqlDatetime(d: Date): string {
@@ -1108,6 +1486,83 @@ export async function createStockAiAnalysis(args: {
   };
 }
 
+export async function getStockAiAnalysisByIdentity(args: {
+  user_id: number;
+  symbol: string;
+  effective_asof: string;
+  freq: "1d" | "1w" | "1m";
+  withinSeconds?: number;
+}): Promise<StoredStockAiAnalysis | null> {
+  const within = Math.max(60, Math.floor(args.withinSeconds ?? 1800));
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      `select id, user_id, symbol, effective_asof, freq, request_json, response_json, created_at
+       from stock_ai_analyses
+       where user_id = ? and symbol = ? and effective_asof = ? and freq = ?
+         and created_at >= (now() - interval ${within} second)
+       order by id desc limit 1`,
+      [args.user_id, args.symbol, args.effective_asof, args.freq]
+    );
+    const r = (rows as any[])[0];
+    if (!r) return null;
+    return {
+      id: Number(r.id),
+      user_id: Number(r.user_id),
+      symbol: String(r.symbol),
+      effective_asof: formatMysqlDateLike(r.effective_asof),
+      freq: String(r.freq) as any,
+      request_json: typeof r.request_json === "string" ? JSON.parse(r.request_json) : (r.request_json ?? {}),
+      response_json: typeof r.response_json === "string" ? JSON.parse(r.response_json) : (r.response_json ?? {}),
+      created_at: formatMysqlDatetimeLike(r.created_at),
+    };
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    const r = await pool.query(
+      `select id, user_id, symbol, effective_asof, freq, request_json, response_json, created_at
+       from stock_ai_analyses
+       where user_id = $1 and symbol = $2 and effective_asof = $3 and freq = $4
+         and created_at >= now() - ($5 || ' seconds')::interval
+       order by id desc limit 1`,
+      [args.user_id, args.symbol, args.effective_asof, args.freq, String(within)]
+    );
+    const row = r.rows?.[0] as any;
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      user_id: Number(row.user_id),
+      symbol: String(row.symbol),
+      effective_asof: String(row.effective_asof),
+      freq: String(row.freq) as any,
+      request_json: row.request_json ?? {},
+      response_json: row.response_json ?? {},
+      created_at: new Date(row.created_at).toISOString(),
+    };
+  }
+  const db = ensureSqlite();
+  const cutoff = new Date(Date.now() - within * 1000).toISOString();
+  const row = db
+    .prepare(
+      `select id, user_id, symbol, effective_asof, freq, request_json, response_json, created_at
+       from stock_ai_analyses
+       where user_id = ? and symbol = ? and effective_asof = ? and freq = ? and created_at >= ?
+       order by id desc limit 1`
+    )
+    .get(args.user_id, args.symbol, args.effective_asof, args.freq, cutoff) as any;
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    user_id: Number(row.user_id),
+    symbol: String(row.symbol),
+    effective_asof: String(row.effective_asof),
+    freq: String(row.freq) as any,
+    request_json: JSON.parse(String(row.request_json || "{}")),
+    response_json: JSON.parse(String(row.response_json || "{}")),
+    created_at: String(row.created_at),
+  };
+}
+
 export async function getStockAiAnalysisById(id: number): Promise<StoredStockAiAnalysis | null> {
   if (storageMode === "mysql") {
     const pool = await ensureMysql();
@@ -1164,6 +1619,103 @@ export async function getStockAiAnalysisById(id: number): Promise<StoredStockAiA
     response_json: JSON.parse(String(row.response_json || "{}")),
     created_at: String(row.created_at),
   };
+}
+
+export async function listStockAiAnalysesByUser(args: {
+  user_id: number;
+  symbol?: string;
+  freq?: "1d" | "1w" | "1m";
+  limit?: number;
+}): Promise<StoredStockAiAnalysis[]> {
+  const lim = Number.isFinite(args.limit) ? Math.max(1, Math.min(50, Math.floor(args.limit!))) : 10;
+  if (storageMode === "mysql") {
+    const pool = await ensureMysql();
+    const conds: string[] = ["user_id = ?"];
+    const params: any[] = [args.user_id];
+    if (args.symbol) {
+      conds.push("symbol = ?");
+      params.push(args.symbol);
+    }
+    if (args.freq) {
+      conds.push("freq = ?");
+      params.push(args.freq);
+    }
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      `select id, user_id, symbol, effective_asof, freq, request_json, response_json, created_at
+       from stock_ai_analyses
+       where ${conds.join(" and ")}
+       order by id desc
+       limit ${lim}`,
+      params
+    );
+    return (rows as any[]).map((r) => ({
+      id: Number(r.id),
+      user_id: Number(r.user_id),
+      symbol: String(r.symbol),
+      effective_asof: formatMysqlDateLike(r.effective_asof),
+      freq: String(r.freq) as any,
+      request_json: typeof r.request_json === "string" ? JSON.parse(r.request_json) : (r.request_json ?? {}),
+      response_json: typeof r.response_json === "string" ? JSON.parse(r.response_json) : (r.response_json ?? {}),
+      created_at: formatMysqlDatetimeLike(r.created_at),
+    }));
+  }
+  if (storageMode === "postgres") {
+    const pool = await ensurePg();
+    const conds: string[] = ["user_id = $1"];
+    const params: any[] = [args.user_id];
+    let idx = 2;
+    if (args.symbol) {
+      conds.push(`symbol = $${idx++}`);
+      params.push(args.symbol);
+    }
+    if (args.freq) {
+      conds.push(`freq = $${idx++}`);
+      params.push(args.freq);
+    }
+    params.push(lim);
+    const r = await pool.query(
+      `select id, user_id, symbol, effective_asof, freq, request_json, response_json, created_at
+       from stock_ai_analyses where ${conds.join(" and ")} order by id desc limit $${idx}`,
+      params
+    );
+    return (r.rows as any[]).map((row) => ({
+      id: Number(row.id),
+      user_id: Number(row.user_id),
+      symbol: String(row.symbol),
+      effective_asof: String(row.effective_asof),
+      freq: String(row.freq) as any,
+      request_json: row.request_json ?? {},
+      response_json: row.response_json ?? {},
+      created_at: new Date(row.created_at).toISOString(),
+    }));
+  }
+  const db = ensureSqlite();
+  const conds: string[] = ["user_id = ?"];
+  const params: any[] = [args.user_id];
+  if (args.symbol) {
+    conds.push("symbol = ?");
+    params.push(args.symbol);
+  }
+  if (args.freq) {
+    conds.push("freq = ?");
+    params.push(args.freq);
+  }
+  const rows = db
+    .prepare(
+      `select id, user_id, symbol, effective_asof, freq, request_json, response_json, created_at
+       from stock_ai_analyses where ${conds.join(" and ")} order by id desc limit ?`
+    )
+    .all(...params, lim) as any[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    user_id: Number(row.user_id),
+    symbol: String(row.symbol),
+    effective_asof: String(row.effective_asof),
+    freq: String(row.freq) as any,
+    request_json: JSON.parse(String(row.request_json || "{}")),
+    response_json: JSON.parse(String(row.response_json || "{}")),
+    created_at: String(row.created_at),
+  }));
 }
 
 export async function createStockAiMessage(args: {
@@ -1561,32 +2113,89 @@ export async function listChartsByUser(
   const take = Math.max(1, Math.min(100, Math.floor(limit || 30)));
   if (storageMode === "mysql") {
     const pool = await ensureMysql();
+    // 部分 MySQL/MariaDB 版本对「LIMIT ?」预编译参数不兼容，take 已钳在 1–100，可安全内联。
     const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-      "select chart_id, created_at, payload from charts where user_id = ? order by created_at desc limit ?",
-      [userId, take]
+      `select chart_id, created_at, payload from charts where user_id = ? order by created_at desc limit ${take}`,
+      [userId]
     );
-    return (rows as any[]).map((r) => {
-      const payload = typeof r.payload === "string" ? JSON.parse(r.payload) : r.payload;
-      const summary = String(payload?.user_readable?.one_line || payload?.basic_summary || "").slice(0, 120);
-      return { chart_id: String(r.chart_id), created_at: String(r.created_at), summary };
-    });
+    const out: Array<{ chart_id: string; created_at: string; summary: string }> = [];
+    for (const r of rows as any[]) {
+      try {
+        const payload = typeof r.payload === "string" ? JSON.parse(r.payload) : r.payload;
+        if (!payload || typeof payload !== "object") continue;
+        const summary = String(payload?.user_readable?.one_line || payload?.basic_summary || "").slice(0, 120);
+        out.push({ chart_id: String(r.chart_id), created_at: String(r.created_at), summary });
+      } catch {
+        /* 跳过损坏行，避免整表列表 400 */
+      }
+    }
+    return out;
   }
   if (storageMode === "postgres") {
-    const pool = await ensurePg();
-    // charts payload is jsonb; user_id is not stored in PG in this version
     throw new Error("list_charts_requires_mysql");
   }
   if (storageMode === "sqlite") {
-    throw new Error("list_charts_requires_mysql");
+    const db = ensureSqlite();
+    const cap = Math.min(500, Math.max(take * 25, 50));
+    const rows = db
+      .prepare("select chart_id, created_at, payload from charts order by datetime(created_at) desc limit ?")
+      .all(cap) as Array<{ chart_id: string; created_at: string; payload: string }>;
+    const out: Array<{ chart_id: string; created_at: string; summary: string }> = [];
+    for (const r of rows) {
+      try {
+        const p = JSON.parse(r.payload) as StoredChart;
+        if (Number(p.user_id) !== Number(userId)) continue;
+        const summary = String(p?.user_readable?.one_line || p?.basic_summary || "").slice(0, 120);
+        out.push({ chart_id: String(r.chart_id), created_at: String(r.created_at), summary });
+        if (out.length >= take) break;
+      } catch {
+        /* skip bad row */
+      }
+    }
+    return out;
+  }
+  if (storageMode === "file") {
+    const db = readDb();
+    return (db.charts || [])
+      .filter((c) => Number(c.user_id) === Number(userId))
+      .slice()
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, take)
+      .map((c) => ({
+        chart_id: c.chart_id,
+        created_at: c.created_at,
+        summary: String(c.user_readable?.one_line || c.basic_summary || "").slice(0, 120),
+      }));
   }
   throw new Error("list_charts_requires_mysql");
+}
+
+async function backfillProfileSortIndexes(pool: mysql.Pool) {
+  const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+  const [users] = await pool.execute<mysql.RowDataPacket[]>("select distinct user_id from profiles");
+  for (const row of users as mysql.RowDataPacket[]) {
+    const uid = Number((row as any).user_id);
+    if (!Number.isFinite(uid)) continue;
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      "select id from profiles where user_id = ? order by id asc",
+      [uid]
+    );
+    let idx = 10;
+    for (const r of rows as mysql.RowDataPacket[]) {
+      await pool.execute(
+        "update profiles set sort_index = ?, updated_at = ? where user_id = ? and id = ? limit 1",
+        [idx, now, uid, Number((r as any).id)]
+      );
+      idx += 10;
+    }
+  }
 }
 
 export async function listProfilesByUser(userId: number): Promise<StoredProfile[]> {
   if (storageMode !== "mysql") throw new Error("profiles_requires_mysql");
   const pool = await ensureMysql();
   const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-    "select id, user_id, name, meta, created_at, updated_at from profiles where user_id = ? order by id desc",
+    "select id, user_id, name, meta, created_at, updated_at, sort_index from profiles where user_id = ? order by sort_index desc, id desc",
     [userId]
   );
   return (rows as any[]).map((r) => ({
@@ -1596,6 +2205,7 @@ export async function listProfilesByUser(userId: number): Promise<StoredProfile[
     meta: parseProfileMeta(r.meta),
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
+    sort_index: r.sort_index != null ? Number(r.sort_index) : 0,
   }));
 }
 
@@ -1609,12 +2219,25 @@ export async function createProfile(
   const now = new Date().toISOString().replace("T", " ").replace("Z", "");
   const n = name.trim().slice(0, 64);
   if (!n) throw new Error("profile_name_required");
+  const [mxRows] = await pool.execute<mysql.RowDataPacket[]>(
+    "select coalesce(max(sort_index), 0) as m from profiles where user_id = ?",
+    [userId]
+  );
+  const nextSort = Number((mxRows as any[])[0]?.m ?? 0) + 10;
   try {
     const [res] = await pool.execute<mysql.ResultSetHeader>(
-      "insert into profiles(user_id, name, meta, created_at, updated_at) values(?, ?, ?, ?, ?)",
-      [userId, n, JSON.stringify(meta ?? {}), now, now]
+      "insert into profiles(user_id, name, meta, created_at, updated_at, sort_index) values(?, ?, ?, ?, ?, ?)",
+      [userId, n, JSON.stringify(meta ?? {}), now, now, nextSort]
     );
-    return { id: Number(res.insertId), user_id: userId, name: n, meta: meta ?? {}, created_at: now, updated_at: now };
+    return {
+      id: Number(res.insertId),
+      user_id: userId,
+      name: n,
+      meta: meta ?? {},
+      created_at: now,
+      updated_at: now,
+      sort_index: nextSort,
+    };
   } catch (e: any) {
     const msg = String(e?.message || "");
     // Duplicate name per user: uniq_profiles_user_name (user_id, name)
@@ -1628,14 +2251,47 @@ export async function createProfile(
 export async function deleteProfile(userId: number, profileId: number): Promise<void> {
   if (storageMode !== "mysql") throw new Error("profiles_requires_mysql");
   const pool = await ensureMysql();
-  // prevent deleting profile that still has charts
-  const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-    "select count(*) as c from charts where user_id = ? and profile_id = ?",
-    [userId, profileId]
-  );
-  const c = Number((rows as any[])[0]?.c ?? 0);
-  if (c > 0) throw new Error("profile_has_charts");
-  await pool.execute("delete from profiles where user_id = ? and id = ? limit 1", [userId, profileId]);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [chartRows] = await conn.execute<mysql.RowDataPacket[]>(
+      "select chart_id from charts where user_id = ? and profile_id = ?",
+      [userId, profileId]
+    );
+    const chartIds = (chartRows as any[]).map((r) => String(r.chart_id)).filter(Boolean);
+    if (chartIds.length > 0) {
+      const ph = chartIds.map(() => "?").join(",");
+      await conn.execute(`delete from ai_reading_cache where chart_id in (${ph})`, chartIds);
+      await conn.execute(
+        `update events set profile_id = null, chart_id = null where user_id = ? and (profile_id = ? or chart_id in (${ph}))`,
+        [userId, profileId, ...chartIds]
+      );
+      await conn.execute("delete from charts where user_id = ? and profile_id = ?", [userId, profileId]);
+    } else {
+      await conn.execute("update events set profile_id = null where user_id = ? and profile_id = ?", [
+        userId,
+        profileId,
+      ]);
+    }
+    await conn.execute(
+      "delete from hepan_reports where user_id = ? and (profile_id_a = ? or profile_id_b = ?)",
+      [userId, profileId, profileId]
+    );
+    const [delProf] = await conn.execute<mysql.ResultSetHeader>(
+      "delete from profiles where user_id = ? and id = ? limit 1",
+      [userId, profileId]
+    );
+    if (delProf.affectedRows === 0) {
+      await conn.rollback();
+      throw new Error("profile_not_found");
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
 }
 
 export async function ensureDefaultProfile(userId: number): Promise<number> {
@@ -1657,7 +2313,7 @@ export async function getProfileById(userId: number, profileId: number): Promise
   if (storageMode !== "mysql") throw new Error("profiles_requires_mysql");
   const pool = await ensureMysql();
   const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-    "select id, user_id, name, meta, created_at, updated_at from profiles where user_id = ? and id = ? limit 1",
+    "select id, user_id, name, meta, created_at, updated_at, sort_index from profiles where user_id = ? and id = ? limit 1",
     [userId, profileId]
   );
   const r = (rows as any[])[0];
@@ -1669,6 +2325,7 @@ export async function getProfileById(userId: number, profileId: number): Promise
     meta: parseProfileMeta(r.meta),
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
+    sort_index: r.sort_index != null ? Number(r.sort_index) : 0,
   };
 }
 
@@ -1703,6 +2360,42 @@ export async function updateProfile(
   return { ...existing, name: nextName, meta: nextMeta, updated_at: now };
 }
 
+/** 按当前列表自上而下顺序写入 sort_index（越大越靠前）。ordered_ids 须为该用户全部档案 id 且无重复。 */
+export async function reorderProfiles(userId: number, orderedIds: number[]): Promise<void> {
+  if (storageMode !== "mysql") throw new Error("profiles_requires_mysql");
+  const pool = await ensureMysql();
+  const [rows] = await pool.execute<mysql.RowDataPacket[]>("select id from profiles where user_id = ?", [userId]);
+  const existing = new Set((rows as any[]).map((r) => Number(r.id)));
+  const ids = orderedIds.map((x) => Math.floor(Number(x))).filter((n) => Number.isFinite(n) && n > 0);
+  if (ids.length !== existing.size || ids.some((id) => !existing.has(id))) {
+    throw new Error("profile_reorder_invalid");
+  }
+  const seen = new Set<number>();
+  for (const id of ids) {
+    if (seen.has(id)) throw new Error("profile_reorder_invalid");
+    seen.add(id);
+  }
+  const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+  let v = ids.length * 10;
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    for (const id of ids) {
+      await conn.execute(
+        "update profiles set sort_index = ?, updated_at = ? where user_id = ? and id = ? limit 1",
+        [v, now, userId, id]
+      );
+      v -= 10;
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 export async function listChartsByProfile(
   userId: number,
   profileId: number,
@@ -1712,14 +2405,21 @@ export async function listChartsByProfile(
   const pool = await ensureMysql();
   const take = Math.max(1, Math.min(100, Math.floor(limit || 30)));
   const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-    "select chart_id, created_at, payload from charts where user_id = ? and profile_id = ? order by created_at desc limit ?",
-    [userId, profileId, take]
+    `select chart_id, created_at, payload from charts where user_id = ? and profile_id = ? order by created_at desc limit ${take}`,
+    [userId, profileId]
   );
-  return (rows as any[]).map((r) => {
-    const payload = typeof r.payload === "string" ? JSON.parse(r.payload) : r.payload;
-    const summary = String(payload?.user_readable?.one_line || payload?.basic_summary || "").slice(0, 120);
-    return { chart_id: String(r.chart_id), created_at: String(r.created_at), summary };
-  });
+  const out: Array<{ chart_id: string; created_at: string; summary: string }> = [];
+  for (const r of rows as any[]) {
+    try {
+      const payload = typeof r.payload === "string" ? JSON.parse(r.payload) : r.payload;
+      if (!payload || typeof payload !== "object") continue;
+      const summary = String(payload?.user_readable?.one_line || payload?.basic_summary || "").slice(0, 120);
+      out.push({ chart_id: String(r.chart_id), created_at: String(r.created_at), summary });
+    } catch {
+      /* skip bad row */
+    }
+  }
+  return out;
 }
 
 export async function getLatestChartByProfile(userId: number, profileId: number): Promise<StoredChart | undefined> {

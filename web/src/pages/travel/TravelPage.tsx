@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Button } from "../../components/ui/button";
+import { APP_FORM_PILL_ACTIVE, APP_FORM_PILL_IDLE, BAZI_FORM_INPUT_CLASS } from "../../lib/appFormStyles";
+import { MascotBadge } from "../../components/MascotBadge";
 
 // 骨架屏组件
 function Skeleton({ className = "" }: { className?: string }) {
   return (
-    <div className={`animate-pulse rounded bg-gray-200 ${className}`} />
+    <div className={`animate-pulse rounded bg-[var(--border-soft)]/70 ${className}`} />
   );
 }
 
@@ -43,7 +45,7 @@ function DestinationCard({ dest, loading, onPick }: { dest: Destination; loading
       onClick={onPick}
     >
       <div className="relative h-40 w-full">
-        <img src={cover} alt={`${dest.name} cover`} className="h-40 w-full object-cover" />
+        <img src={cover} alt={`${dest.name} cover`} loading="lazy" decoding="async" className="h-40 w-full object-cover" />
         {src ? (
           <img
             src={src}
@@ -144,7 +146,7 @@ function PlanSkeleton() {
 function showToast(message: string) {
   // 创建 toast 元素
   const toast = document.createElement("div");
-  toast.className = "fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg text-sm animate-fade-in";
+  toast.className = "fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--info-soft)] px-4 py-2 text-[var(--fs-sm)] text-[var(--info)] shadow-[var(--elev-lifted)] backdrop-blur animate-fade-in";
   toast.textContent = message;
   document.body.appendChild(toast);
   // 2秒后移除
@@ -407,6 +409,10 @@ const COMMON_CITIES = [
   "海口",
 ];
 
+function valueOrAny(v: string, fallback = "不限") {
+  return String(v || "").trim() || fallback;
+}
+
 export function TravelPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -420,7 +426,7 @@ export function TravelPage() {
   /** 行程开始日 YYYY-MM-DD，默认今天 */
   const [startDate, setStartDate] = useState(() => ymdAddDays(localTodayYmd(), 1));
   /** 含首日的行程天数 */
-  const [tripDays, setTripDays] = useState(3);
+  const [tripDays, setTripDays] = useState<number | "">(3);
   /** 输入模式：ai=先推荐目的地；direct=直接指定目的地生成 */
   const [inputMode, setInputMode] = useState<TravelInputMode>("ai");
   /** 直接规划：手动指定目的地（可选） */
@@ -439,6 +445,7 @@ export function TravelPage() {
   const [nearbyPlay, setNearbyPlay] = useState(false);
   const [nearbyDestinations, setNearbyDestinations] = useState(false);
   const [outOfProvinceOnly, setOutOfProvinceOnly] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // 推荐结果
   const [destinations, setDestinations] = useState<Destination[]>([]);
@@ -448,6 +455,8 @@ export function TravelPage() {
 
   const mode: "input" | "recommend" | "plan" =
     location.pathname === "/xinglv/recommend" ? "recommend" : location.pathname === "/xinglv/plan" ? "plan" : "input";
+  const effectiveTripDays = typeof tripDays === "number" && Number.isFinite(tripDays) ? tripDays : NaN;
+  const tripDaysValid = Number.isInteger(effectiveTripDays) && effectiveTripDays >= 1 && effectiveTripDays <= 60;
 
   // bump versions to invalidate older cached overseas/unstable images
   const ssDraftKey = "travelDraft:v3";
@@ -683,7 +692,7 @@ export function TravelPage() {
       showToast("请选择有效的开始日期");
       return;
     }
-    if (tripDays < 1 || tripDays > 60) {
+    if (!tripDaysValid) {
       showToast("出行天数请填写 1～60");
       return;
     }
@@ -695,7 +704,7 @@ export function TravelPage() {
       setOutOfProvinceOnly(false);
     }
     const startDateStr = startDate;
-    const endDateStr = tripEndDateInclusive(startDateStr, tripDays);
+    const endDateStr = tripEndDateInclusive(startDateStr, effectiveTripDays);
 
     setLoading(true);
     setBusy("recommend");
@@ -753,7 +762,11 @@ export function TravelPage() {
       return;
     }
     const startDateStr = startDate;
-    const endDateStr = tripEndDateInclusive(startDateStr, tripDays);
+    if (!tripDaysValid) {
+      showToast("出行天数请填写 1～60");
+      return;
+    }
+    const endDateStr = tripEndDateInclusive(startDateStr, effectiveTripDays);
     setLoading(true);
     setBusy("plan");
     try {
@@ -823,60 +836,70 @@ export function TravelPage() {
     navigate("/xinglv", { replace: true });
   }
 
+  const endDateLabel = isValidYmd(startDate) && tripDaysValid ? tripEndDateInclusive(startDate, effectiveTripDays) : "—";
+  const selectedPreferenceLabels = PREFERENCE_OPTIONS.filter((p) => preferences.includes(p.value)).map((p) => p.label);
+
   return (
     <div className="page-travel home-landing pb-12">
       <nav className="home-navbar">
-        <Link to="/" className="home-logo-link">
+        <Link to="/" className="home-logo-link" aria-label="返回首页">
           <div className="home-logo-circle" aria-hidden />
           <span className="home-logo-text">知行馆</span>
         </Link>
         <div className="home-navbar-actions">
-          {/* 极简：去掉“帮助中心”入口 */}
+          <button type="button" className="home-help-btn" onClick={() => setHelpOpen(true)}>
+            帮助中心
+          </button>
         </div>
       </nav>
 
-      <header className="home-landing-header">
+      <header className="home-landing-header" aria-labelledby="travel-page-title">
         <div className="home-landing-header-content">
-          <h1 className="home-landing-title">行旅筹划·灵犀行程</h1>
-          <p className="home-landing-subline mt-2">一次生成可执行行程</p>
+          <h1 id="travel-page-title" className="home-landing-title">行旅筹划·灵犀行程</h1>
+          <p className="home-landing-subline mt-2">目的地推荐 · 行程生成 · 预算清单</p>
         </div>
+        <MascotBadge to="/" label="返回首页" />
       </header>
 
+      <div className="home-landing-surface max-w-full overflow-x-hidden p-5">
       {/* 输入区域 */}
       {mode === "input" && (
-        <section className="home-landing-surface mx-auto max-w-3xl p-6">
-          <h2 className="mb-4 text-lg font-bold text-[var(--text-strong)]">填写出行信息</h2>
-
-          {/* 模式切换：避免“同屏两个主按钮”导致误点 */}
-          <div className="mb-4 grid grid-cols-2 gap-2 rounded-2xl border border-[var(--border-soft)] bg-[var(--surface-soft)] p-1">
+        <section>
+          {/* 模式切换：轨道略深、选中块白底 + 金边 + 字重，避免「白贴白」看不清 */}
+          <div className="mb-4 grid grid-cols-2 gap-1.5 rounded-2xl border border-[var(--border-soft)] bg-[#e7e5e4]/90 p-1 shadow-[inset_0_1px_2px_rgba(28,25,23,0.06)]">
             <button
               type="button"
+              aria-pressed={inputMode === "ai"}
               onClick={() => setInputMode("ai")}
               className={[
-                "h-10 rounded-xl text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+                "h-10 rounded-xl text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
                 inputMode === "ai"
-                  ? "bg-[var(--surface)] text-[var(--text-strong)] shadow-[var(--elev-soft)] ring-1 ring-[var(--border-soft)]"
-                  : "text-[var(--text-muted)] hover:text-[var(--text-main)]",
+                  ? "relative z-[1] bg-white font-extrabold text-[var(--text-strong)] shadow-[0_3px_10px_rgba(28,25,23,0.1)] ring-2 ring-[var(--accent)] ring-offset-0"
+                  : "font-semibold text-[var(--text-muted)] hover:bg-white/40 hover:text-[var(--text-main)]",
               ].join(" ")}
             >
               AI 推荐目的地
             </button>
             <button
               type="button"
+              aria-pressed={inputMode === "direct"}
               onClick={() => setInputMode("direct")}
               className={[
-                "h-10 rounded-xl text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+                "h-10 rounded-xl text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
                 inputMode === "direct"
-                  ? "bg-[var(--surface)] text-[var(--text-strong)] shadow-[var(--elev-soft)] ring-1 ring-[var(--border-soft)]"
-                  : "text-[var(--text-muted)] hover:text-[var(--text-main)]",
+                  ? "relative z-[1] bg-white font-extrabold text-[var(--text-strong)] shadow-[0_3px_10px_rgba(28,25,23,0.1)] ring-2 ring-[var(--accent)] ring-offset-0"
+                  : "font-semibold text-[var(--text-muted)] hover:bg-white/40 hover:text-[var(--text-main)]",
               ].join(" ")}
             >
               直接选目的地
             </button>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {inputMode === "direct" ? (
+          <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
+            <div className="home-landing-surface-inset p-4">
+              <div className="mb-3 text-xs font-semibold tracking-[0.14em] text-[var(--text-muted)]">基础信息</div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {inputMode === "direct" ? (
               <div className="sm:col-span-2">
                 <label className="text-xs font-semibold text-[var(--text-muted)]">目的地 *</label>
                 <div className="mt-2 flex flex-wrap gap-2">
@@ -967,7 +990,16 @@ export function TravelPage() {
                 min={1}
                 max={60}
                 value={tripDays}
-                onChange={(e) => setTripDays(Math.min(60, Math.max(1, Number(e.target.value) || 1)))}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === "") {
+                    setTripDays("");
+                    return;
+                  }
+                  const next = Number(raw);
+                  if (!Number.isFinite(next)) return;
+                  setTripDays(Math.min(60, Math.max(1, Math.floor(next))));
+                }}
                 className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
               />
             </div>
@@ -975,23 +1007,19 @@ export function TravelPage() {
               <p className="text-xs text-[var(--text-muted)]">
                 结束日：{" "}
                 <span className="font-medium text-[var(--text-main)]">
-                  {isValidYmd(startDate) ? tripEndDateInclusive(startDate, tripDays) : "—"}
+                  {endDateLabel}
                 </span>
               </p>
             </div>
-          </div>
+              </div>
 
-          <details className="mt-4 home-landing-surface-inset rounded-xl px-4 py-3">
-            <summary className="cursor-pointer select-none text-sm font-semibold text-[var(--text-main)]">
-              高级选项（可选）
-            </summary>
-            <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="text-xs font-semibold text-[var(--text-muted)]">预算范围</label>
                 <select
                   value={budget}
                   onChange={(e) => setBudget(e.target.value)}
-                  className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                  className={BAZI_FORM_INPUT_CLASS}
                 >
                   <option value="">不限</option>
                   <option value="low">3000元以内</option>
@@ -1007,55 +1035,35 @@ export function TravelPage() {
                   max={20}
                   value={people}
                   onChange={(e) => setPeople(Number(e.target.value) || 1)}
-                  className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                  className={BAZI_FORM_INPUT_CLASS}
                 />
               </div>
-              <div className="sm:col-span-2">
+              <div className="min-w-0">
                 <label className="text-xs font-semibold text-[var(--text-muted)]">出发地</label>
                 <input
                   type="text"
                   placeholder="如：上海"
                   value={departure}
                   onChange={(e) => setDeparture(e.target.value)}
-                  className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                  className={BAZI_FORM_INPUT_CLASS}
                 />
               </div>
-              {inputMode === "ai" ? (
-                <>
+              </div>
+            </div>
+
+            <div className="home-landing-surface-inset p-4">
+              <div className="mb-3 text-xs font-semibold tracking-[0.14em] text-[var(--text-muted)]">偏好与约束</div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {inputMode === "ai" ? (
                   <div className="sm:col-span-2">
-                    <div className="mt-1 flex items-center gap-2">
-                      <input
-                        id="nearbyDestinations"
-                        type="checkbox"
-                        checked={nearbyDestinations}
-                        onChange={(e) => setNearbyDestinations(e.target.checked)}
-                        className="h-4 w-4 rounded border border-[var(--border-soft)] accent-[var(--focus-ring)]"
-                      />
-                      <label htmlFor="nearbyDestinations" className="text-sm text-[var(--text-main)] select-none">
-                        周边游（离出发地近的城市）
-                      </label>
-                    </div>
-                    {nearbyDestinations ? (
-                      <div className="mt-2 flex items-center gap-2 pl-6">
-                        <input
-                          id="outOfProvinceOnly"
-                          type="checkbox"
-                          checked={outOfProvinceOnly}
-                          onChange={(e) => setOutOfProvinceOnly(e.target.checked)}
-                          className="h-4 w-4 rounded border border-[var(--border-soft)] accent-[var(--focus-ring)]"
-                        />
-                        <label htmlFor="outOfProvinceOnly" className="text-sm text-[var(--text-main)] select-none">
-                          只推荐非省内（跨省）
-                        </label>
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="text-xs font-semibold text-[var(--text-muted)]">目的地范围</label>
+                    <label htmlFor="travel-dest-scope" className="text-xs font-semibold text-[var(--text-muted)]">
+                      目的地范围
+                    </label>
                     <select
+                      id="travel-dest-scope"
                       value={destinationScope}
                       onChange={(e) => setDestinationScope(e.target.value as DestinationScope)}
-                      className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
+                      className={BAZI_FORM_INPUT_CLASS}
                     >
                       {DEST_SCOPE_OPTIONS.map((opt) => (
                         <option key={opt.value} value={opt.value}>
@@ -1064,80 +1072,114 @@ export function TravelPage() {
                       ))}
                     </select>
                   </div>
-                </>
-              ) : null}
-              <div className="sm:col-span-2">
-                <label className="text-xs font-semibold text-[var(--text-muted)]">酒店品牌</label>
-                <select
-                  value={hotelBrand}
-                  onChange={(e) => setHotelBrand(e.target.value)}
-                  className="mt-1 block h-10 w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]"
-                >
-                  {HOTEL_BRAND_OPTIONS.map((opt) => (
-                    <option key={opt.value || "__any__"} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="sm:col-span-2">
-                <label className="text-xs font-semibold text-[var(--text-muted)]">住宿偏好</label>
-                <div className="mt-2 flex flex-col gap-2">
-                  <label className="flex items-center gap-2 text-sm text-[var(--text-main)]">
-                    <input
-                      type="checkbox"
-                      checked={sameStay}
-                      onChange={(e) => setSameStay(e.target.checked)}
-                      className="h-4 w-4 rounded border border-[var(--border-soft)] accent-[var(--focus-ring)]"
-                    />
-                    全程同住
+                ) : null}
+                {inputMode === "ai" ? (
+                  <div className="sm:col-span-2">
+                    <div className="text-xs font-semibold text-[var(--text-muted)]">出行范围</div>
+                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2">
+                      <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[var(--text-main)]">
+                        <input
+                          id="nearbyDestinations"
+                          type="checkbox"
+                          checked={nearbyDestinations}
+                          onChange={(e) => setNearbyDestinations(e.target.checked)}
+                          className="h-4 w-4 shrink-0 rounded border border-[var(--border-soft)] accent-[var(--focus-ring)]"
+                        />
+                        周边游（近出发地）
+                      </label>
+                      {nearbyDestinations ? (
+                        <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[var(--text-main)]">
+                          <input
+                            id="outOfProvinceOnly"
+                            type="checkbox"
+                            checked={outOfProvinceOnly}
+                            onChange={(e) => setOutOfProvinceOnly(e.target.checked)}
+                            className="h-4 w-4 shrink-0 rounded border border-[var(--border-soft)] accent-[var(--focus-ring)]"
+                          />
+                          跨省优先
+                        </label>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+                <div>
+                  <label htmlFor="travel-hotel-brand" className="text-xs font-semibold text-[var(--text-muted)]">
+                    酒店品牌
                   </label>
+                  <select id="travel-hotel-brand" value={hotelBrand} onChange={(e) => setHotelBrand(e.target.value)} className={BAZI_FORM_INPUT_CLASS}>
+                    {HOTEL_BRAND_OPTIONS.map((opt) => (
+                      <option key={opt.value || "__any__"} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <span className="text-xs font-semibold text-[var(--text-muted)]">住宿偏好</span>
+                  <div className="mt-1">
+                    <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[var(--text-main)]">
+                      <input
+                        type="checkbox"
+                        checked={sameStay}
+                        onChange={(e) => setSameStay(e.target.checked)}
+                        className="h-4 w-4 shrink-0 rounded border border-[var(--border-soft)] accent-[var(--focus-ring)]"
+                      />
+                      全程同住
+                    </label>
+                  </div>
+                </div>
+                <div className="sm:col-span-2">
+                  <div className="text-xs font-semibold text-[var(--text-muted)]">偏好标签</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {PREFERENCE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => togglePreference(opt.value)}
+                        className={preferences.includes(opt.value) ? APP_FORM_PILL_ACTIVE : APP_FORM_PILL_IDLE}
+                      >
+                        {preferences.includes(opt.value) ? `✓ ${opt.label}` : opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className="sm:col-span-2">
-                <label className="text-xs font-semibold text-[var(--text-muted)]">偏好标签</label>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {PREFERENCE_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => togglePreference(opt.value)}
-                      className={`rounded-full border px-3 py-1.5 text-sm transition ${
-                        preferences.includes(opt.value)
-                          ? "border-[var(--focus-ring)] bg-[var(--focus-ring)] text-white"
-                          : "border-[var(--border-soft)] bg-[var(--surface-soft)] text-[var(--text-main)]"
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </details>
 
-          <div className="mt-6 flex flex-col items-stretch justify-center gap-2 sm:flex-row">
+              <div className="mt-4 rounded-xl border border-[var(--border-soft)] bg-white/35 p-3">
+                <div className="text-xs font-semibold tracking-[0.14em] text-[var(--text-muted)]">当前配置</div>
+                <div className="mt-2 grid gap-1.5 text-sm text-[var(--text-main)]">
+                  <div>日期：{startDate || "—"} 至 {endDateLabel}</div>
+                  <div>人数：{people} 人 · 预算：{valueOrAny(budget)}</div>
+                  <div>出发地：{valueOrAny(departure, "未填写")}</div>
+                  <div>酒店：{valueOrAny(HOTEL_BRAND_OPTIONS.find((x) => x.value === hotelBrand)?.label || "")}</div>
+                  <div>偏好：{selectedPreferenceLabels.length ? selectedPreferenceLabels.join("、") : "不限"}</div>
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-col items-stretch gap-2">
             {inputMode === "direct" ? (
               <Button
                 onClick={() => generatePlan(directDestination)}
-                disabled={loading || tripDays < 1 || !isValidYmd(startDate) || !String(directDestination || "").trim()}
+                disabled={loading || !tripDaysValid || !isValidYmd(startDate) || !String(directDestination || "").trim()}
               >
                 {loading && busy === "plan" ? "AI 生成中..." : "⚡ 生成行程"}
               </Button>
             ) : (
-              <Button onClick={getRecommendations} disabled={loading || tripDays < 1 || !isValidYmd(startDate)}>
+              <Button onClick={getRecommendations} disabled={loading || !tripDaysValid || !isValidYmd(startDate)}>
                 {loading && busy === "recommend" ? "AI 规划中..." : "✨ 开始规划"}
               </Button>
             )}
-          </div>
+              </div>
           {longLoading && (
-            <div className="mt-3 flex items-center justify-center gap-2 text-xs text-[var(--text-muted)]">
+                <div className="mt-3 flex items-center justify-center gap-2 text-xs text-[var(--text-muted)]">
               <span>超过 60s 仍未完成，可能卡住或网络异常。</span>
               <Button variant="secondary" size="sm" onClick={abortAndUnlock}>
                 取消并重试
               </Button>
             </div>
           )}
+            </div>
+          </div>
         </section>
       )}
 
@@ -1226,7 +1268,7 @@ export function TravelPage() {
                       const query = day.spots.map((s) => s.name).join(" → ");
                       window.open(`https://gaode.com/search?query=${encodeURIComponent(query)}`, "_blank");
                     }}
-                    className="rounded bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-200"
+                    className="rounded-[var(--radius-sm)] bg-[var(--info-soft)] px-2 py-1 text-xs font-medium text-[var(--info)] hover:opacity-85"
                   >
                     🗺️ 查看地图
                   </button>
@@ -1306,12 +1348,12 @@ export function TravelPage() {
                                   <div className="font-semibold">
                                     📍 {spot.name}
                                     {spot.level && (
-                                      <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700">
+                                      <span className="ml-1 rounded-[var(--radius-sm)] bg-[var(--warning-soft)] px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]">
                                         {spot.level}
                                       </span>
                                     )}
                                     {spot.type && (
-                                      <span className="ml-1 rounded bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-700">
+                                      <span className="ml-1 rounded-[var(--radius-sm)] bg-[var(--info-soft)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
                                         {spot.type}
                                       </span>
                                     )}
@@ -1343,7 +1385,7 @@ export function TravelPage() {
                                         "_blank"
                                       );
                                     }}
-                                    className="rounded bg-green-100 px-2 py-0.5 text-green-700 hover:bg-green-200"
+                                    className="rounded-[var(--radius-sm)] bg-[var(--success-soft)] px-2 py-0.5 text-[var(--success)] hover:opacity-85"
                                   >
                                     🗺️ 导航
                                   </button>
@@ -1489,15 +1531,15 @@ export function TravelPage() {
                 createdAt: new Date().toISOString(),
               });
               localStorage.setItem("travel_plans", JSON.stringify(saved));
-              alert("行程已保存！");
-            }}>💾 保存行程</Button>
+              showToast("行程已保存");
+            }}><span aria-hidden>💾</span> 保存行程</Button>
             <Button variant="secondary" onClick={() => {
               if (!travelPlan) return;
               // 生成简单分享文本
               const text = `${travelPlan.summary}\n\n${travelPlan.itinerary.map(d => `第${d.day}天：${d.spots.map(s => s.name).join(" → ")}`).join("\n")}\n\n预算：${travelPlan.budget.total}`;
               navigator.clipboard.writeText(text);
-              alert("行程已复制到剪贴板！");
-            }}>📋 复制分享</Button>
+              showToast("行程已复制到剪贴板");
+            }}><span aria-hidden>📋</span> 复制分享</Button>
             <Button variant="secondary" onClick={() => {
               if (!travelPlan) return;
               // 生成 ICS 日历文件
@@ -1517,23 +1559,47 @@ END:VCALENDAR`;
               a.download = `${travelPlan.destination}-行程.ics`;
               a.click();
               URL.revokeObjectURL(url);
-            }}>📅 导出日历</Button>
+            }}><span aria-hidden>📅</span> 导出日历</Button>
             <Button variant="secondary" onClick={() => {
               const saved = JSON.parse(localStorage.getItem("travel_plans") || "[]");
               if (saved.length === 0) {
-                alert("暂无保存的行程");
+                showToast("暂无保存的行程");
                 return;
               }
               const list = saved.map((p: any, i: number) => `${i + 1}. ${p.destination} - ${p.summary}`).join("\n");
-              alert("已保存的行程：\n\n" + list);
-            }}>📚 我的行程</Button>
+              showToast(`已保存 ${saved.length} 条行程`);
+              console.log("已保存的行程：\n" + list);
+            }}><span aria-hidden>📚</span> 我的行程</Button>
           </div>
         </section>
       )}
+      </div>
 
       <div className="mt-10 text-center text-xs text-[var(--text-muted)]">
         本行程由 AI 生成，仅供娱乐参考
       </div>
+
+      {helpOpen ? (
+        <div
+          className="home-modern-modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4"
+          onClick={(e) => e.currentTarget === e.target && setHelpOpen(false)}
+        >
+          <div className="home-modern-modal-panel w-full max-w-[560px] rounded-[18px] p-4">
+            <h3 className="home-modern-modal-title mb-2 text-[1.12rem] font-bold">帮助中心</h3>
+            <p className="home-modern-modal-text mb-2 text-[0.92rem] leading-[1.55]">
+              行旅筹划支持两种入口：先让 AI 推荐目的地，或直接指定目的地生成行程。
+            </p>
+            <p className="home-modern-modal-text mb-2 text-[0.92rem] leading-[1.55]">
+              填写日期、人数、预算、出发地和偏好后，可在「推荐目的地」与「行程方案」之间切换查看结果。
+            </p>
+            <div className="mt-2.5 flex justify-end">
+              <Button variant="secondary" size="sm" onClick={() => setHelpOpen(false)}>
+                我知道了
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

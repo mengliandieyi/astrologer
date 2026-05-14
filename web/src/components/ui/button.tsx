@@ -15,6 +15,7 @@ const buttonVariants = cva(
         ghost: "text-[var(--text-main)] hover:bg-[var(--surface-soft)]",
       },
       size: {
+        xs: "h-7 px-2 text-xs rounded-[var(--radius-sm)]",
         sm: "h-9 px-3",
         md: "h-10 px-4",
         lg: "h-11 px-5",

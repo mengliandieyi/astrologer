@@ -12,10 +12,11 @@ import { assignAbGroup } from "./lib/abTest.js";
 import { getProReportDynamic, trackEvent } from "./api/mvpHandlers.js";
 import type { BirthMeta } from "./lib/baziExtendedMeta.js";
 import { calculateBaziFromSolar } from "./lib/baziCalculator.js";
-import { generateAiReading } from "./lib/aiClient.js";
+import { generateAiReading, qwenChatCompletion } from "./lib/aiClient.js";
 import { registerStocksRoutes } from "./api/stocksHandlers.js";
 import { registerTravelRoutes } from "./api/travelHandlers.js";
 import { enrichChartFortuneCycles } from "./lib/enrichChartFortunes.js";
+import { startQuotesSyncScheduler } from "./lib/scheduler.js";
 import {
   createUser,
   createUserWithEmail,
@@ -49,12 +50,18 @@ import {
   listChartsByUser,
   listHepanReportsByUser,
   listProfilesByUser,
+  reorderProfiles,
   saveAiReadingCache,
   saveChart,
   upsertHepanReport,
   updateProfile,
 } from "./lib/store.js";
 import { sendPasswordResetEmail, sendTestEmail } from "./lib/mailer.js";
+import { installGlobalErrorHooks, listRecentErrors, logError } from "./lib/errorLogger.js";
+import { interpretStandaloneDream } from "./lib/dreamInterpreter.js";
+import { buildDreamFortuneContext } from "./lib/dreamFortuneContext.js";
+
+installGlobalErrorHooks();
 
 type ChartRecord = {
   chart_id: string;
@@ -476,6 +483,7 @@ app.get("/api/me/charts", requireAuth, async (req, res) => {
     const rows = await listChartsByUser(uid, Number.isFinite(limit) ? limit : 30);
     return res.json({ charts: rows });
   } catch (e: any) {
+    logError("express", e, { route: "GET /api/me/charts", userId: uid });
     return res.status(400).json({ error: String(e?.message || e) });
   }
 });
@@ -501,6 +509,25 @@ app.post("/api/me/profiles", requireAuth, async (req, res) => {
     return res.json({ profile: p });
   } catch (e: any) {
     return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/me/profiles/reorder", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const raw = (req.body as any)?.ordered_ids;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return res.status(400).json({ error: "ordered_ids_required" });
+  }
+  const ordered_ids = raw.map((x: unknown) => Number(x)).filter((n) => Number.isFinite(n) && n > 0);
+  try {
+    await reorderProfiles(uid, ordered_ids);
+    return res.json({ ok: true });
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (msg.includes("profile_reorder_invalid")) {
+      return res.status(400).json({ error: "profile_reorder_invalid" });
+    }
+    return res.status(400).json({ error: msg });
   }
 });
 
@@ -554,6 +581,22 @@ app.get("/api/me/profiles/:profileId/charts", requireAuth, async (req, res) => {
   try {
     const rows = await listChartsByProfile(uid, pid, Number.isFinite(limit) ? limit : 30);
     return res.json({ charts: rows });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+/** 当前档案下最近一次已存命盘（读库；不触发重新排盘） */
+app.get("/api/me/profiles/:profileId/latest-chart", requireAuth, async (req, res) => {
+  const uid = (req as any).userId as number;
+  const pid = Number(req.params.profileId ?? "");
+  if (!Number.isFinite(pid) || pid <= 0) return res.status(400).json({ error: "profile_id_required" });
+  try {
+    const p = await getProfileById(uid, Math.floor(pid));
+    if (!p) return res.status(404).json({ error: "profile_not_found" });
+    const raw = await getLatestChartByProfile(uid, Math.floor(pid));
+    if (!raw) return res.status(404).json({ error: "no_chart_for_profile" });
+    return res.json({ chart: enrichChartFortuneCycles(raw) });
   } catch (e: any) {
     return res.status(400).json({ error: String(e?.message || e) });
   }
@@ -696,6 +739,103 @@ app.post("/api/bazi/calculate", requireAuth, async (req, res) => {
     // Provide detail for debugging; frontend will humanize.
     const detail = String(e?.message || "");
     return res.status(422).json({ error: "invalid_birth_datetime", detail: detail.slice(0, 200) });
+  }
+});
+
+app.post("/api/bazi/dream-interpret", requireAuth, async (req, res) => {
+  try {
+    const userId = Number((req as any).userId || 0);
+    if (!userId) return res.status(401).json({ error: "unauthorized" });
+    const chartId = String((req.body as any)?.chart_id ?? "").trim();
+    const dream = String((req.body as any)?.dream_text ?? "").trim();
+    if (!chartId) return res.status(400).json({ error: "chart_id_required" });
+    if (dream.length < 10) return res.status(400).json({ error: "dream_text_too_short" });
+    if (dream.length > 2000) return res.status(400).json({ error: "dream_text_too_long" });
+
+    const chart = await getChart(chartId);
+    if (!chart) return res.status(404).json({ error: "chart_not_found" });
+    const owner = chart.user_id != null && Number(chart.user_id) === userId;
+    if (!owner) return res.status(403).json({ error: "chart_not_owned" });
+
+    const apiKey = process.env.ALI_API_KEY?.trim();
+    if (!apiKey) {
+      return res.json({
+        chart_id: chartId,
+        provider: "fallback",
+        answer:
+          "当前未配置通义密钥（ALI_API_KEY），暂无法进行 AI 解梦。请在项目根目录 .env 配置密钥并重启后端。\n\n" +
+          "在等待配置期间，可先记录：梦境里反复出现的意象、情绪强度、与现实压力源的关联；若情绪持续困扰，建议寻求心理健康专业支持。",
+      });
+    }
+
+    const strongest = maxElement(chart.five_elements || {});
+    const weakest = minElement(chart.five_elements || {});
+    const pillars = chart.pillars || ({} as Record<string, string>);
+    const pillStr = [pillars.year, pillars.month, pillars.day, pillars.hour].filter(Boolean).join(" ");
+    const fortuneContext = buildDreamFortuneContext(chart);
+
+    const out = await qwenChatCompletion({
+      model: (process.env.ALI_MODEL || "").trim() || undefined,
+      temperature: 0.45,
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是偏传统民俗解梦风格、同时参考四柱八字的解梦师。请使用简体中文，可适度使用 Markdown 标题与列表。用户想知道这个梦主要指向什么事项，不是只要心理安慰。\n\n" +
+            "守则：\n" +
+            "1）开头必须先判断此梦与哪个领域相关性最大：事业/工作、感情/婚恋、财运/资源、健康/身心、家庭/人际、学业/考试、迁移/出行、其他。必须只选 1 个「主相关领域」，可选 0～2 个「次相关领域」，并给出置信度（高/中/低）和依据。\n" +
+            "2）请用三级标题 ### 依次组织小节：事项相关性判断；一句话断梦；梦中意象拆解；吉凶倾向；结合命盘；当前运势触发点；近期提醒；建议与避忌。不要使用「## 解梦结果」或类似总标题。\n" +
+            "3）「事项相关性判断」不要每个领域都展开，只解释为什么主领域最大；若有次相关领域，说明它们为什么只是辅助。\n" +
+            "4）「梦中意象拆解」要逐一解释梦里出现的人、物、地点、动作、情绪；「吉凶倾向」只能写偏吉/偏凶/吉凶参半/不明显，并说明理由，禁止危言耸听。\n" +
+            "5）「结合命盘」要引用四柱、五行偏旺偏弱、喜忌或一句断语中的至少 2 项；如果命盘依据不足，明确说依据有限，不要编造。\n" +
+            "6）「当前运势触发点」必须结合当前日期、当前大运、当前流年、当前流月，判断这个梦更像长期趋势、大运阶段主题、今年主题，还是近期一个月内的提醒；如果某项未命中，明确说未命中，不要编造。\n" +
+            "7）不得断言绝症、死亡、灾祸、破财等具体事件；不得编造命主生活中未出现的具体事实；不确定处请标注「仅为推测」。",
+        },
+        {
+          role: "user",
+          content: [
+            `四柱：${pillStr || "—"}`,
+            `性别：${chart.gender === 0 ? "女" : chart.gender === 1 ? "男" : "未提供"}`,
+            `格局：${chart.ge_ju || "—"}`,
+            `五行偏旺：${toCnElement(strongest)}`,
+            `五行偏弱：${toCnElement(weakest)}`,
+            `日主强弱：${chart.day_master?.strength_level ?? "—"}（分数 ${chart.day_master?.strength_score ?? "—"}）`,
+            `喜用：${(chart.day_master?.useful_elements ?? []).join("、") || "—"}`,
+            `忌神：${(chart.day_master?.avoid_elements ?? []).join("、") || "—"}`,
+            `一句断语：${chart.user_readable?.one_line || chart.basic_summary || "—"}`,
+            "",
+            "【当前运势上下文】",
+            fortuneContext,
+            "",
+            "【梦境描述】",
+            dream,
+          ].join("\n"),
+        },
+      ],
+    });
+
+    if (!out.ok) {
+      return res.status(502).json({ error: "ai_failed", detail: String(out.error || "").slice(0, 500) });
+    }
+    return res.json({ chart_id: chartId, provider: "qwen", answer: out.text });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
+  }
+});
+
+/** 无命盘上下文：本地规则解梦（登录即可，便于审计；不消耗大模型） */
+app.post("/api/bazi/dream-interpret-standalone", requireAuth, async (req, res) => {
+  try {
+    const userId = Number((req as any).userId || 0);
+    if (!userId) return res.status(401).json({ error: "unauthorized" });
+    const dream = String((req.body as any)?.dream_text ?? "").trim();
+    if (dream.length < 10) return res.status(400).json({ error: "dream_text_too_short" });
+    if (dream.length > 2000) return res.status(400).json({ error: "dream_text_too_long" });
+
+    const answer = interpretStandaloneDream(dream);
+    return res.json({ provider: "rules", answer });
+  } catch (e: any) {
+    return res.status(400).json({ error: String(e?.message || e) });
   }
 });
 
@@ -1622,8 +1762,19 @@ async function generateGenericAiText(prompt: string): Promise<string> {
   }
 }
 
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.get("/api/admin/errors", requireAdmin, (req, res) => {
+  const limitRaw = Number(req.query.limit ?? 100);
+  const limit = Number.isFinite(limitRaw) ? limitRaw : 100;
+  return res.json({ items: listRecentErrors(limit) });
+});
+
+app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = err instanceof Error ? err.message : "unknown_error";
+  logError("express", err, {
+    path: req.path,
+    method: req.method,
+    uid: (req as any).userId ?? null,
+  });
   // eslint-disable-next-line no-console
   console.error(JSON.stringify({ level: "error", type: "unhandled_error", message }));
   if (res.headersSent) return;
@@ -1634,4 +1785,7 @@ const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => {
   // eslint-disable-next-line no-console
   console.log(`astrologer-mvp listening on :${port}`);
+  if (process.env.QUOTES_SYNC_ENABLED !== "false") {
+    startQuotesSyncScheduler();
+  }
 });

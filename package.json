@@ -12,6 +12,7 @@
     "build:web": "npm --prefix web run build",
     "prod:start": "./scripts/start-prod.sh",
     "prod:stop": "./scripts/stop-prod.sh",
+    "restart:hard": "bash scripts/restart-hard.sh",
     "prod:health": "./scripts/healthcheck.sh",
     "backup": "./scripts/backup-sqlite.sh"
   },

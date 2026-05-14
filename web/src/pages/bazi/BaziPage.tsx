@@ -1,11 +1,13 @@
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import { MascotBadge } from "../../components/MascotBadge";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { RegionCombobox } from "../../components/bazi/RegionCombobox";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { Textarea, Select } from "../../components/ui/input";
 import { HepanPanel } from "../hepan/HepanPanel";
 import { TIMEZONE_OPTIONS_ZH } from "../../lib/timezonesZh";
 import { authLogout, authMe, createProfile, getProfile, listProfiles, type Profile } from "../../lib/authClient";
@@ -375,6 +377,12 @@ function explainError(message: string): string {
   if (message.includes("too_many_requests")) return "请求过于频繁，请稍后再试";
   if (message.includes("chart_id_and_anon_id_required")) return "缺少 anon_id";
   if (message.includes("chart_not_found")) return "排盘不存在或已过期";
+  if (message.includes("chart_id_required")) return "缺少命盘编号，请先完成排盘";
+  if (message.includes("dream_text_too_short")) return "梦境描述过短，请至少写约 10 个字";
+  if (message.includes("dream_text_too_long")) return "梦境描述过长，请控制在 2000 字以内";
+  if (message.includes("chart_not_owned")) return "只能对本人保存的命盘使用解梦（分享链接匿名盘不可用）";
+  if (message.includes("ai_failed")) return "AI 解梦暂时失败，请稍后重试";
+  if (message.includes("no_chart_for_profile")) return "该档案下还没有已保存的命盘：需先在八字页完成一次排盘并保存；此处只读库，不会替你重新排盘。";
   if (message.includes("request_timeout")) return "等待超时（全项常需 1–3 分钟）。请重试；若反复出现，请检查服务器 Caddy/Nginx 反代 read_timeout 是否 ≥300s。";
   if (message.includes("network_or_gateway"))
     return "连接被中断（常见于反代超时：全项常 >60s）。请在服务器 Caddy 的 reverse_proxy 内设置 transport http { read_timeout 300s; response_header_timeout 300s } 后 systemctl reload caddy，并执行 npm run build 后重启 PM2。";
@@ -414,6 +422,76 @@ async function getJsonWithTimeout<T>(url: string, timeoutMs: number): Promise<T>
   }
 }
 
+async function postJsonWithTimeout<T>(url: string, payload: unknown, timeoutMs: number): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      credentials: "include",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as T;
+  } catch (e) {
+    const name = e instanceof Error ? e.name : "";
+    const msg = e instanceof Error ? e.message : String(e);
+    if (name === "AbortError") throw new Error("request_timeout");
+    if (/failed to fetch|load failed|networkerror|network request failed/i.test(msg)) {
+      throw new Error("network_or_gateway");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 去掉模型或旧模板顶部的总标题，避免与页面版式重复 */
+function stripLeadingDreamResultHeading(markdown: string): string {
+  let s = markdown.trimStart();
+  s = s.replace(/^#{1,3}\s*解梦结果\s*\n+/u, "");
+  s = s.replace(/^#{1,3}\s*解读正文\s*\n+/u, "");
+  return s.trimStart();
+}
+
+/** 解梦结果 Markdown（与灵犀解读区组件风格对齐） */
+const dreamMdComponents = {
+  h1: ({ children }: { children?: React.ReactNode }) => <div className="mb-2 mt-1 text-base font-semibold">{children}</div>,
+  h2: ({ children }: { children?: React.ReactNode }) => <div className="mb-2 mt-2 text-sm font-semibold">{children}</div>,
+  h3: ({ children }: { children?: React.ReactNode }) => <div className="mb-1.5 mt-2 text-sm font-semibold">{children}</div>,
+  p: ({ children }: { children?: React.ReactNode }) => <div className="whitespace-pre-wrap">{children}</div>,
+  ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
+  ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
+  li: ({ children }: { children?: React.ReactNode }) => <li className="leading-6">{children}</li>,
+  blockquote: ({ children }: { children?: React.ReactNode }) => (
+    <blockquote className="my-2 border-l-2 border-[rgba(148,163,184,0.55)] pl-3 text-[var(--text-muted)]">{children}</blockquote>
+  ),
+  strong: ({ children }: { children?: React.ReactNode }) => (
+    <strong className="rounded bg-[rgba(250,204,21,0.22)] px-1 py-0.5 font-semibold text-[var(--text-strong)]">{children}</strong>
+  ),
+  em: ({ children }: { children?: React.ReactNode }) => (
+    <em className="font-medium not-italic underline decoration-[rgba(250,204,21,0.55)] underline-offset-2">{children}</em>
+  ),
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="underline decoration-[rgba(74,167,148,0.45)] underline-offset-2 hover:decoration-[rgba(74,167,148,0.75)]"
+    >
+      {children}
+    </a>
+  ),
+  code: ({ children }: { children?: React.ReactNode }) => (
+    <code className="rounded bg-[rgba(15,23,42,0.06)] px-1 py-0.5 text-[0.85em]">{children}</code>
+  ),
+  pre: ({ children }: { children?: React.ReactNode }) => (
+    <pre className="my-2 overflow-x-auto rounded-lg border border-[var(--border-soft)] bg-[rgba(15,23,42,0.04)] p-2 text-[0.85em]">{children}</pre>
+  ),
+};
+
 function FormField(props: { label: string; children: React.ReactNode; full?: boolean }) {
   return (
     <div className={props.full ? "min-w-0 sm:col-span-2" : "min-w-0"}>
@@ -425,6 +503,20 @@ function FormField(props: { label: string; children: React.ReactNode; full?: boo
 
 function InputClassName() {
   return "bazi-form-input mt-1 block h-10 min-w-0 max-w-full w-full rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 text-sm text-[var(--text-main)] outline-none focus:border-[var(--focus-ring)]";
+}
+
+const DREAM_KIND_STORAGE_KEY = "bazi_dream_kind";
+
+function dreamProfileOptionLabel(p: Profile): string {
+  const raw = (p.name || "未命名").trim() || "未命名";
+  const name = raw
+    .replace(/\s*（\d+）\s*$/, "")
+    .replace(/\s*\(\d+\)\s*$/, "")
+    .trim();
+  const base = name || raw;
+  const relRaw = p.meta && typeof (p.meta as Record<string, unknown>).relation === "string" ? (p.meta as Record<string, unknown>).relation : "";
+  const rel = String(relRaw || "").trim();
+  return rel ? `${base} · ${rel}` : base;
 }
 
 function ComboInputClassName() {
@@ -467,14 +559,21 @@ export function BaziPage() {
                     ? "full"
                     : null;
   const tabFromQuery = String(params.get("tab") || "").trim().toLowerCase();
-  const initialTab: "bazi" | "hepan" = tabFromQuery === "hepan" ? "hepan" : "bazi";
+  type BaziPageTab = "bazi" | "hepan" | "dream";
+  const initialTab: BaziPageTab = fromShare
+    ? "bazi"
+    : tabFromQuery === "hepan"
+      ? "hepan"
+      : tabFromQuery === "dream"
+        ? "dream"
+        : "bazi";
   const profileIdFromQuery = useMemo(() => {
     const raw = String(params.get("profile_id") || "").trim();
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 ? n : null;
   }, [params]);
 
-  const [activeTab, setActiveTab] = useState<"bazi" | "hepan">(initialTab);
+  const [activeTab, setActiveTab] = useState<BaziPageTab>(initialTab);
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -535,6 +634,12 @@ export function BaziPage() {
   const aiChatScrollRef = useRef<HTMLDivElement | null>(null);
   /** 大模型解读请求进行中：解读结果区显示占位与预计时长 */
   const [aiGenerating, setAiGenerating] = useState(false);
+  const [dreamText, setDreamText] = useState("");
+  const [dreamResult, setDreamResult] = useState("");
+  const [dreamErr, setDreamErr] = useState("");
+  const [dreamLoading, setDreamLoading] = useState(false);
+  /** 解梦「结合命盘」：选用档案（提交时先按该档案排盘再请求 AI） */
+  const [dreamProfileId, setDreamProfileId] = useState<number | null>(null);
   /** 同步防连点：避免 React 批处理下第二次请求在 busy 生效前发出 */
   const genAiInFlightRef = useRef(false);
   /** 最近一次 AI 解读模板：与接口 analyst_mode 一致 */
@@ -553,6 +658,7 @@ export function BaziPage() {
   const [createArchiveErr, setCreateArchiveErr] = useState("");
   const [creatingArchive, setCreatingArchive] = useState(false);
   const createArchiveInputRef = useRef<HTMLInputElement | null>(null);
+  const dreamKindHydratedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1057,6 +1163,120 @@ export function BaziPage() {
   /** 大模型解读仅依赖排盘 chart_id；不与页面 busy（排盘/分享）强耦合，避免误锁按钮 */
   const canGenAi = Boolean(chart?.chart_id && !aiGenerating);
   const canShare = Boolean(chart?.chart_id && !busy);
+  const dreamSubmodeChart = String(params.get("dream_kind") || "").trim().toLowerCase() === "chart";
+  const canDreamInterpret = Boolean(
+    authLoggedIn && !dreamLoading && (dreamSubmodeChart ? Boolean(dreamProfileId) : true)
+  );
+
+  /** 换命盘时清空右侧解梦结果；保留梦境正文，避免「排盘并解梦」后输入被清空 */
+  useEffect(() => {
+    setDreamResult("");
+    setDreamErr("");
+  }, [chart?.chart_id]);
+
+  /** 档案列表或当前档案变化时，校正解梦所选档案 */
+  useEffect(() => {
+    if (!profiles.length) {
+      setDreamProfileId(null);
+      return;
+    }
+    setDreamProfileId((prev) => {
+      if (prev && profiles.some((p) => p.id === prev)) return prev;
+      if (activeProfileId && profiles.some((p) => p.id === activeProfileId)) return activeProfileId;
+      return profiles[0]?.id ?? null;
+    });
+  }, [profiles, activeProfileId]);
+
+  const dreamKindInUrl = params.get("dream_kind");
+
+  useEffect(() => {
+    if (activeTab !== "dream") {
+      dreamKindHydratedRef.current = false;
+      return;
+    }
+    if (fromShare || dreamKindInUrl) return;
+    if (dreamKindHydratedRef.current) return;
+    if (!authChecked || !authLoggedIn || profiles.length === 0) return;
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(DREAM_KIND_STORAGE_KEY);
+    } catch {
+      /* noop */
+    }
+    if (saved !== "chart") return;
+    dreamKindHydratedRef.current = true;
+    const sp = new URLSearchParams(params);
+    sp.set("tab", "dream");
+    sp.set("dream_kind", "chart");
+    setParams(sp, { replace: true });
+  }, [activeTab, authChecked, authLoggedIn, profiles.length, fromShare, dreamKindInUrl, params, setParams]);
+
+  async function submitDreamInterpret() {
+    if (!authLoggedIn || dreamLoading) return;
+    const t = dreamText.trim();
+    if (t.length < 10) {
+      setDreamErr("请至少输入约 10 个字的梦境描述。");
+      return;
+    }
+    if (t.length > 2000) {
+      setDreamErr("梦境描述请勿超过 2000 字。");
+      return;
+    }
+    const withChart = String(params.get("dream_kind") || "").trim().toLowerCase() === "chart";
+    const pid = dreamProfileId;
+    if (withChart && !pid) {
+      setDreamErr("请先选择档案，或到「我的档案」创建一条并补全出生信息。");
+      return;
+    }
+    setDreamErr("");
+    setDreamLoading(true);
+    setDreamResult("");
+    try {
+      if (withChart) {
+        const chartOut = await postJsonWithTimeout<ChartRecord>(
+          "/api/bazi/calculate",
+          { profile_id: pid },
+          120_000
+        );
+        setChart(chartOut);
+        const out = await postJsonWithTimeout<{ answer: string }>(
+          "/api/bazi/dream-interpret",
+          { chart_id: chartOut.chart_id, dream_text: t },
+          120_000
+        );
+        setDreamResult(String(out?.answer || "").trim() || "AI 暂无返回");
+      } else {
+        const out = await postJsonWithTimeout<{ answer: string }>("/api/bazi/dream-interpret-standalone", { dream_text: t }, 20_000);
+        setDreamResult(String(out?.answer || "").trim() || "暂无返回");
+      }
+    } catch (e) {
+      setDreamErr(explainError((e as any)?.message || ""));
+    } finally {
+      setDreamLoading(false);
+    }
+  }
+
+  function applyDreamSubmode(next: "plain" | "chart") {
+    setDreamResult("");
+    setDreamErr("");
+    const sp = new URLSearchParams(params);
+    sp.set("tab", "dream");
+    if (next === "chart") sp.set("dream_kind", "chart");
+    else sp.delete("dream_kind");
+    setParams(sp, { replace: true });
+    try {
+      localStorage.setItem(DREAM_KIND_STORAGE_KEY, next === "chart" ? "chart" : "plain");
+    } catch {
+      /* noop */
+    }
+    if (next === "chart") {
+      setDreamProfileId((p) => {
+        if (p && profiles.some((x) => x.id === p)) return p;
+        if (activeProfileId && profiles.some((x) => x.id === activeProfileId)) return activeProfileId;
+        return profiles[0]?.id ?? null;
+      });
+    }
+  }
 
   /**
    * 当前解读维度高亮：只跟 aiAnalystMode 走，不跟 showAiReading。
@@ -1100,10 +1320,7 @@ export function BaziPage() {
             </div>
           ) : null}
         </div>
-        <Link to="/" className="home-landing-mascot shrink-0" aria-label="返回首页">
-          <div className="home-landing-mascot-icon" aria-hidden />
-          <div className="home-landing-mascot-text">可可爱爱小馆灵</div>
-        </Link>
+        <MascotBadge to="/" label="返回首页" />
       </header>
 
       {!fromShare ? (
@@ -1127,6 +1344,22 @@ export function BaziPage() {
           <button
             type="button"
             className={
+              activeTab === "dream"
+                ? "rounded-full border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 py-1.5 text-sm font-semibold text-[var(--text-strong)]"
+                : "rounded-full border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-[var(--text-muted)] hover:border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
+            }
+            onClick={() => {
+              setActiveTab("dream");
+              const sp = new URLSearchParams(params);
+              sp.set("tab", "dream");
+              setParams(sp, { replace: true });
+            }}
+          >
+            解梦
+          </button>
+          <button
+            type="button"
+            className={
               activeTab === "hepan"
                 ? "rounded-full border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 py-1.5 text-sm font-semibold text-[var(--text-strong)]"
                 : "rounded-full border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-[var(--text-muted)] hover:border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
@@ -1145,6 +1378,156 @@ export function BaziPage() {
 
       {activeTab === "hepan" && !fromShare ? (
         <HepanPanel loggedIn={authLoggedIn} profiles={profiles} initialProfileIdA={activeProfileId} />
+      ) : activeTab === "dream" && !fromShare ? (
+        <section className="mt-2 grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start" aria-labelledby="bazi-dream-title">
+          <div className="home-landing-surface min-w-0 p-5 sm:p-6">
+            <div className="border-b border-[var(--border-soft)] pb-4">
+              <h2 id="bazi-dream-title" className="text-base font-extrabold text-[var(--text-strong)]">
+                解梦
+              </h2>
+            </div>
+
+            <div
+              className="mt-4 grid w-full max-w-lg grid-cols-2 gap-2 rounded-xl border border-[var(--border-soft)] bg-[var(--surface-soft)] p-1.5 sm:max-w-md"
+              role="tablist"
+              aria-label="解梦方式"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!dreamSubmodeChart}
+                className={
+                  !dreamSubmodeChart
+                    ? "min-h-[44px] rounded-lg border-2 border-[var(--accent)] bg-[var(--accent-tint-18)] px-3 py-2.5 text-sm font-semibold text-[var(--text-strong)] shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2"
+                    : "min-h-[44px] rounded-lg border-2 border-transparent bg-transparent px-3 py-2.5 text-sm font-medium text-[var(--text-muted)] transition-colors hover:bg-white/70 hover:text-[var(--text-main)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2"
+                }
+                onClick={() => applyDreamSubmode("plain")}
+              >
+                无八字
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={dreamSubmodeChart}
+                className={
+                  dreamSubmodeChart
+                    ? "min-h-[44px] rounded-lg border-2 border-[var(--accent)] bg-[var(--accent-tint-18)] px-3 py-2.5 text-sm font-semibold text-[var(--text-strong)] shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2"
+                    : "min-h-[44px] rounded-lg border-2 border-transparent bg-transparent px-3 py-2.5 text-sm font-medium text-[var(--text-muted)] transition-colors hover:bg-white/70 hover:text-[var(--text-main)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2"
+                }
+                onClick={() => applyDreamSubmode("chart")}
+              >
+                结合命盘
+              </button>
+            </div>
+
+            {!authLoggedIn ? (
+              <div className="home-landing-surface-inset mt-4 px-4 py-3 text-sm text-[var(--text-main)]">
+                提交解梦需登录。请先{" "}
+                <Link
+                  className="underline decoration-[rgba(74,120,108,0.45)] underline-offset-4"
+                  to={`/login?next=${encodeURIComponent("/bazi?tab=dream")}`}
+                >
+                  登录
+                </Link>{" "}
+                或{" "}
+                <Link
+                  className="underline decoration-[rgba(74,120,108,0.45)] underline-offset-4"
+                  to={`/register?next=${encodeURIComponent("/bazi?tab=dream")}`}
+                >
+                  注册
+                </Link>
+                。
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                {dreamSubmodeChart ? (
+                  <FormField label="档案" full>
+                    {!profiles.length ? (
+                      <div className="home-landing-surface-inset mt-1 p-3 text-sm text-[var(--text-main)]">
+                        还没有档案。请先到{" "}
+                        <Link className="underline decoration-[rgba(74,120,108,0.45)] underline-offset-4" to="/my/profiles">
+                          我的档案
+                        </Link>{" "}
+                        创建一条并补全生日、时间、时区与出生地。
+                      </div>
+                    ) : (
+                      <>
+                        <Select
+                          className={"mt-1 " + InputClassName()}
+                          value={dreamProfileId != null ? String(dreamProfileId) : ""}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
+                            setDreamProfileId(Number.isFinite(v) && v > 0 ? v : null);
+                          }}
+                          disabled={dreamLoading}
+                          aria-label="解梦所选档案"
+                        >
+                          {profiles.map((p) => (
+                            <option key={p.id} value={String(p.id)}>
+                              {dreamProfileOptionLabel(p)}
+                            </option>
+                          ))}
+                        </Select>
+                      </>
+                    )}
+                  </FormField>
+                ) : null}
+                <div className="space-y-3">
+                    <FormField label="梦境描述" full>
+                      <Textarea
+                        className="mt-1"
+                        value={dreamText}
+                        onChange={(e) => setDreamText(e.target.value)}
+                        placeholder="尽量写清场景、人物、情绪，以及醒后印象最深的一点……"
+                        disabled={dreamLoading}
+                        rows={7}
+                        maxLength={2000}
+                        aria-invalid={Boolean(dreamErr)}
+                      />
+                    </FormField>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant={dreamSubmodeChart ? "secondary" : "primary"}
+                        disabled={!canDreamInterpret}
+                        onClick={() => void submitDreamInterpret()}
+                      >
+                        {dreamLoading
+                          ? dreamSubmodeChart
+                            ? "排盘并解梦中…"
+                            : "解梦中…"
+                          : dreamSubmodeChart
+                            ? "排盘并解梦"
+                            : "开始解梦"}
+                      </Button>
+                    </div>
+                    {dreamErr ? <p className="text-sm text-[var(--danger)]">{dreamErr}</p> : null}
+                  </div>
+              </div>
+            )}
+          </div>
+
+          <div className="home-landing-surface min-w-0 p-5 sm:p-6">
+            <div className="min-h-[min(42vh,20rem)] rounded-xl border border-[var(--border-soft)] bg-[var(--surface-panel)] p-4 sm:min-h-[min(52vh,28rem)]">
+              {!dreamResult && !dreamLoading ? (
+                <p className="text-sm text-[var(--text-muted)]">{authLoggedIn ? "提交后显示在此。" : "登录后提交。"}</p>
+              ) : dreamLoading && !dreamResult ? (
+                <div className="flex h-full min-h-[12rem] flex-col items-center justify-center px-4 py-10 text-center" role="status">
+                  <p className="text-sm font-semibold text-[var(--text-strong)]">{dreamSubmodeChart ? "生成中…" : "解梦中…"}</p>
+                </div>
+              ) : (
+                <div className="text-sm text-[var(--text-main)]">
+                  <div className="max-h-[min(52vh,28rem)] overflow-auto break-words pr-1">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} components={dreamMdComponents}>
+                      {stripLeadingDreamResultHeading(dreamResult)}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              )}
+              {dreamErr && !dreamResult ? <p className="mt-4 text-sm text-[var(--danger)]">{dreamErr}</p> : null}
+            </div>
+          </div>
+        </section>
       ) : (
         <section className="mt-2 grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
         <div className="home-landing-surface min-w-0 p-5 sm:p-6">
@@ -1407,6 +1790,10 @@ export function BaziPage() {
               </li>
             </ul>
           </details>
+
+          <div className="home-landing-surface-inset mt-4 p-4 text-xs leading-relaxed text-[var(--text-muted)]">
+            <span className="font-semibold text-[var(--text-main)]">解梦</span>：顶部「解梦」进入；「无八字」为本地规则，「结合命盘」选档案后点「排盘并解梦」；右侧为结果区。
+          </div>
         </div>
 
         <div className="home-landing-surface min-w-0 overflow-x-auto p-5 sm:p-6">
@@ -1937,4 +2324,3 @@ export function BaziPage() {
     </div>
   );
 }
-

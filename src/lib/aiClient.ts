@@ -46,6 +46,72 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * 通义流式调用：onDelta 接收增量文本，返回完整文本。
+ * 兼容 OpenAI 兼容层 SSE：data: {"choices":[{"delta":{"content":"..."}}]} \n\n  ... data: [DONE]
+ */
+export async function qwenStreamChatCompletion(args: {
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  model?: string;
+  temperature?: number;
+  onDelta: (delta: string) => void;
+  signal?: AbortSignal;
+}): Promise<{ ok: true; text: string; model: string } | { ok: false; error: string }> {
+  const apiKey = process.env.ALI_API_KEY?.trim();
+  if (!apiKey) return { ok: false as const, error: "ALI_API_KEY_NOT_SET" };
+  const baseUrl = (process.env.ALI_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const model = (args.model || process.env.ALI_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  const body = JSON.stringify({
+    model,
+    temperature: args.temperature ?? 0.4,
+    enable_thinking: false,
+    stream: true,
+    messages: args.messages,
+  });
+  try {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body,
+      signal: args.signal,
+    });
+    if (!res.ok || !res.body) {
+      return { ok: false as const, error: `HTTP_${res.status}: ${await res.text().catch(() => "")}` };
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buf = "";
+    let full = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, "");
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        try {
+          const obj = JSON.parse(payload);
+          const delta = obj?.choices?.[0]?.delta?.content;
+          if (typeof delta === "string" && delta) {
+            full += delta;
+            args.onDelta(delta);
+          }
+        } catch {
+          // ignore malformed chunk
+        }
+      }
+    }
+    if (!full) return { ok: false as const, error: "EMPTY_STREAM" };
+    return { ok: true as const, text: full, model };
+  } catch (e: any) {
+    return { ok: false as const, error: String(e?.message || e) };
+  }
+}
+
 export async function qwenChatCompletion(args: {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   model?: string;

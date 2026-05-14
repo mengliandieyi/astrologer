@@ -5,7 +5,8 @@ import { authLogout, authMe } from "../../lib/authClient";
 
 export function StocksTabs() {
   const [params, setParams] = useSearchParams();
-  const active = params.get("tab") === "screener" ? "screener" : "single";
+  const tab = params.get("tab");
+  const active = tab === "screener" ? "screener" : tab === "news" ? "news" : "single";
 
   return (
     <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -38,6 +39,21 @@ export function StocksTabs() {
         }}
       >
         策略选股
+      </button>
+      <button
+        type="button"
+        className={
+          active === "news"
+            ? "rounded-full border border-[var(--border-soft)] bg-[var(--surface-soft)] px-3 py-1.5 text-sm font-semibold text-[var(--text-strong)]"
+            : "rounded-full border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-[var(--text-muted)] hover:border-[var(--border-soft)] hover:bg-[var(--surface-soft)]"
+        }
+        onClick={() => {
+          const sp = new URLSearchParams(params);
+          sp.set("tab", "news");
+          setParams(sp, { replace: true });
+        }}
+      >
+        热点新闻
       </button>
     </div>
   );
@@ -90,4 +106,3 @@ export function StocksTopbar(props: { onOpenHelp: () => void }) {
     </nav>
   );
 }
-
