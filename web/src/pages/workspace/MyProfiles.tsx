@@ -282,7 +282,7 @@ export function MyProfiles() {
     setBusy(true);
     setErr("");
     try {
-      await reorderProfiles(nextOrder.map((x) => x.id));
+      await reorderProfiles(nextOrder.map((p: Profile) => p.id));
       await refreshList(activeId ?? undefined);
     } catch (e: any) {
       setErr(explainError(String((e as any)?.message || e)));
@@ -463,7 +463,11 @@ export function MyProfiles() {
             {profiles.length === 0 ? (
               <div className="text-sm text-[var(--text-muted)]">暂无档案。点击右上角「新建档案」。</div>
             ) : (
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(e) => void handleProfileDragEnd(e)}>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={(e: DragEndEvent) => void handleProfileDragEnd(e)}
+              >
                 <SortableContext items={profiles.map((p) => p.id)} strategy={verticalListSortingStrategy}>
                   {profiles.map((p) => {
                     const meta = (p.meta ?? {}) as Record<string, unknown>;
