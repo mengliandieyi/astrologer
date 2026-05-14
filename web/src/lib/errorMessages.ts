@@ -40,6 +40,12 @@ const STATUS_FALLBACK: Record<number, string> = {
 
 export function friendlyError(code: string | undefined, status?: number): string {
   if (code && MAP[code]) return MAP[code];
+  const c = code?.trim();
+  // 后端不少路由在 catch 里统一 res.status(400)，body.error 实为 DB/JSON 等英文信息；
+  // 若先套 STATUS_FALLBACK[400]，会一律变成「请求参数有误」，与真实原因不符。
+  if (status === 400 && c) {
+    return `请求被拒（400）：${c.length > 160 ? `${c.slice(0, 160)}…` : c}`;
+  }
   if (typeof status === "number" && STATUS_FALLBACK[status]) return STATUS_FALLBACK[status];
   if (code && code.length < 80 && /[\u4e00-\u9fa5]/.test(code)) return code;
   return "请求失败，请稍后重试";
