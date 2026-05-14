@@ -170,20 +170,30 @@ app.use((req, res, next) => {
   const requestId = crypto.randomUUID();
   const startAt = Date.now();
   res.setHeader("x-request-id", requestId);
+  let lastJsonBody: unknown;
+  const origJson = res.json.bind(res);
+  res.json = function jsonWithCapture(body: unknown) {
+    lastJsonBody = body;
+    return origJson(body);
+  };
   res.on("finish", () => {
+    const status = res.statusCode;
+    const line: Record<string, unknown> = {
+      level: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
+      type: "request_log",
+      request_id: requestId,
+      method: req.method,
+      path: req.path,
+      status,
+      duration_ms: Date.now() - startAt,
+      ip: req.ip || req.socket.remoteAddress || "unknown",
+    };
+    if (status >= 400 && lastJsonBody != null && typeof lastJsonBody === "object" && lastJsonBody !== null) {
+      const err = (lastJsonBody as { error?: unknown }).error;
+      if (err != null) line.response_error = String(err).slice(0, 500);
+    }
     // eslint-disable-next-line no-console
-    console.log(
-      JSON.stringify({
-        level: "info",
-        type: "request_log",
-        request_id: requestId,
-        method: req.method,
-        path: req.path,
-        status: res.statusCode,
-        duration_ms: Date.now() - startAt,
-        ip: req.ip || req.socket.remoteAddress || "unknown",
-      })
-    );
+    console.log(JSON.stringify(line));
   });
   next();
 });
