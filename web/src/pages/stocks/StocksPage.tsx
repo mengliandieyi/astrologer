@@ -12,6 +12,7 @@ import { StocksTopbar } from "./StocksTopbar";
 import { StocksScreenerPage } from "./StocksScreenerPage";
 import { StocksHotNewsPage } from "./StocksHotNewsPage";
 import { StocksTabs } from "./StocksTopbar";
+import { visibleBarsRange } from "../../lib/chartRanges";
 import {
   askStockAi,
   createStockAiAnalysis,
@@ -76,20 +77,6 @@ type KlineRow = {
 
 const DEFAULT_VISIBLE_BARS = 180;
 const ALL_MA_PERIODS = [5, 10, 20, 30, 60, 120, 250] as const;
-
-function visibleBarsRange(total: number, visibleBars: number | null, maPeriods: number[]): { from: number; to: number } | null {
-  if (total <= 0) return null;
-  if (visibleBars == null) return null;
-  const n = Math.max(20, Math.min(520, Math.floor(Number(visibleBars))));
-  const maxMa = Math.max(
-    5,
-    ...((maPeriods || [])
-      .map((x) => Math.floor(Number(x)))
-      .filter((x) => Number.isFinite(x) && x > 1) as number[])
-  );
-  const withWarmup = Math.min(900, n + maxMa);
-  return { from: Math.max(0, total - withWarmup), to: total - 1 };
-}
 
 function toUtcTimestampSec(ymd8: string) {
   const s = String(ymd8 || "");
@@ -1037,7 +1024,7 @@ export function StocksPage() {
     const volSeries = volRef.current;
     if (!openCharts || !symbolForCharts || !chartApi || !candleSeries || !volSeries) return;
     const to = todayIso();
-    const from = new Date(Date.now() - 365 * 6 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const from = new Date(Date.now() - 365 * 12 * 24 * 3600 * 1000).toISOString().slice(0, 10);
     setKlineErr(null);
     if (!symbolForCharts) {
       setKlineErr("请先选择股票代码");
@@ -2178,9 +2165,9 @@ export function StocksPage() {
                                 "border-[var(--border-soft)] bg-white/35 text-[var(--text-muted)] hover:bg-white/55",
                               ].join(" ")}
                               onClick={() => setBarsPickerOpen((v) => !v)}
-                              title="选择最近多少根K线"
+                              title="选择最近多少根K线；图表会自动多显示一段历史用于均线预热"
                             >
-                              {visibleBars == null ? "全部" : `${visibleBars}`}
+                              {visibleBars == null ? "全部" : `${visibleBars}+`}
                             </button>
                             {barsPickerOpen ? (
                               <div className="absolute left-0 top-full z-50 mt-1 w-[220px] max-w-[calc(100vw-3rem)] rounded-lg border border-[var(--border-soft)] bg-white/90 p-2 shadow-lg backdrop-blur">
@@ -2202,9 +2189,9 @@ export function StocksPage() {
                                           setVisibleBars(n);
                                           setBarsPickerOpen(false);
                                         }}
-                                        title={`最近 ${n} 根K线`}
+                                        title={`最近 ${n} 根K线，并额外显示均线预热历史`}
                                       >
-                                        {n}
+                                        {n}+
                                       </button>
                                     );
                                   })}
